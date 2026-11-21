@@ -1,0 +1,7 @@
+data/
+reports/
+runtime/
+*.log
+.env
+config/local.conf
+__pycache__/
