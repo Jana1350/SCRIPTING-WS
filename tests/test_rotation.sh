@@ -11,7 +11,7 @@ readonly SATURDAY='2026-11-20T18:30:00+00:00,60.0,70.0,80.0'
 readonly SUNDAY='2026-11-22T09:00:00+05:30,80.0,90.0,100.0'
 readonly TODAY='2026-11-23T09:00:00+05:30,22.0,33.0,44.0'
 
-repo_root=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+repo_root=$(CDPATH='' cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 work=$(mktemp -d /tmp/sysguard-test-rotation.XXXXXXXX)
 trap 'find "$work" -depth -delete' EXIT
 checkout=$work/checkout
@@ -132,8 +132,13 @@ write_csv "$active"
 before=$(fingerprint "$data")
 expect_status 0 '' rotate --as-of "$AS_OF"
 [[ $(fingerprint "$data") == "$before" ]] || fail 'header-only log changed'
+(
+    cd -- "$checkout"
+    CDPATH=. expect_status 0 '' bash scripts/rotate_logs.sh --config test.conf --data-dir "$data" --as-of "$AS_OF" --dry-run
+)
+[[ $(fingerprint "$data") == "$before" ]] || fail 'relative dry-run with CDPATH set changed the data tree'
 assert_no_staging
-printf '%s\n' 'PASS: missing and header-only active logs are no-ops'
+printf '%s\n' 'PASS: missing and header-only active logs are no-ops, including a relative dry-run with CDPATH set'
 
 generate_reports() {
     local destination=$1

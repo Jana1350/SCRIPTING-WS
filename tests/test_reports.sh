@@ -4,7 +4,7 @@ export LC_ALL=C TZ=Asia/Kolkata
 
 readonly HEADER='timestamp,cpu_percent,memory_percent,disk_percent'
 readonly REPORT_DATE=2026-11-20
-repo_root=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+repo_root=$(CDPATH='' cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 work=$(mktemp -d /tmp/sysguard-test-reports.XXXXXXXX)
 trap 'find "$work" -depth -delete' EXIT
 export XDG_CACHE_HOME="$work/cache"
@@ -120,7 +120,13 @@ assert_metric Disk 6 40.0% 40.0% 40.00%
     expect_status 0 '' bash "$script" daily --config html-only.conf --data-dir test-data --date "$REPORT_DATE"
 )
 cmp -s -- "$html" "$checkout/reports/daily/$REPORT_DATE.html" || fail 'repository-relative paths or default report path differ'
+(
+    cd -- "$checkout"
+    CDPATH=. expect_status 0 '' bash scripts/report.sh daily --config html-only.conf --data-dir test-data --date "$REPORT_DATE"
+)
+cmp -s -- "$html" "$checkout/reports/daily/$REPORT_DATE.html" || fail 'CDPATH changed repository discovery'
 printf '%s\n' 'PASS: approved v1 fixture and repository-relative paths from a different working directory'
+printf '%s\n' 'PASS: relative report invocation with CDPATH set'
 
 expect_status 0 '' report --date 2026-11-19
 assert_contains 'NO DATA' "$output/daily/2026-11-19.html"

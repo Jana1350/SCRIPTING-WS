@@ -606,7 +606,7 @@ main() {
     done
     script_dir=${BASH_SOURCE[0]%/*}
     [[ $script_dir != "${BASH_SOURCE[0]}" ]] || script_dir=.
-    repo_root=$(cd -P -- "$script_dir/.." && pwd -P) || return 4
+    repo_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd -P) || return 4
     config=$(repo_path "${options[--config]:-config/local.conf}")
     data_dir=$(repo_path "${options[--data-dir]:-data}")
     output_root=$(repo_path "${options[--output-dir]:-reports}")
