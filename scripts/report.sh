@@ -7,14 +7,19 @@ diagnostic() {
 }
 
 usage() {
-    printf '%s\n' 'Usage: report.sh daily [--date YYYY-MM-DD] [--config FILE] [--data-dir DIR] [--output-dir DIR]' \
+    printf '%s\n' 'Usage: report.sh daily|weekly [--date YYYY-MM-DD] [--config FILE] [--data-dir DIR] [--output-dir DIR]' \
         '       report.sh --help' \
-        'Without --date, reports the previous completed local day (using TZ or the system timezone).' \
-        'Daily HTML requires REPORT_PDF_ENABLED=0. Relative paths resolve from the repository root.'
+        'Daily defaults to the previous completed local day.' \
+        'Weekly defaults to the previous completed Monday–Sunday. An explicit date must be a Monday.' \
+        'Dates use TZ or the system timezone. Relative paths resolve from the repository root.' \
+        'HTML reports require REPORT_PDF_ENABLED=0.'
 }
 
 parse_args() {
-    [[ ${1-} == daily ]] || return 2
+    case ${1-} in
+        daily|weekly) period=$1 ;;
+        *) return 2 ;;
+    esac
     shift
     while (( $# )); do
         case $1 in
@@ -130,17 +135,31 @@ local_day_start() {
 }
 
 resolve_window() {
-    local today next_day canonical_day
+    local today next_day canonical_day weekday days_back=1 days_in_period=1
     if [[ ${options[--date]+set} ]]; then
         report_date=${options[--date]}
     else
         today=$(date +%F) || return 3
-        report_date=$(date -u -d "$today 1 day ago" +%F) || return 3
+        if [[ $period == weekly ]]; then
+            weekday=$(date -u -d "$today" +%u) || return 3
+            days_back=$((weekday + 6))
+        fi
+        report_date=$(date -u -d "$today $days_back days ago" +%F) || return 3
     fi
     [[ $report_date =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && $report_date != 0000-* ]] || return 3
     canonical_day=$(date -u -d "$report_date" +%F 2>/dev/null) || return 3
     [[ $canonical_day == "$report_date" ]] || return 3
-    next_day=$(date -u -d "$report_date 1 day" +%F) || return 3
+    report_name=$report_date
+    report_label=$report_date
+    if [[ $period == weekly ]]; then
+        weekday=$(date -u -d "$report_date" +%u) || return 3
+        [[ $weekday == 1 ]] || return 3
+        report_last=$(date -u -d "$report_date 6 days" +%F) || return 3
+        report_name=${report_date}_to_${report_last}
+        report_label="$report_date to $report_last"
+        days_in_period=7
+    fi
+    next_day=$(date -u -d "$report_date $days_in_period days" +%F) || return 3
     start=$(local_day_start "$report_date") && end=$(local_day_start "$next_day") || return 3
 }
 
@@ -157,7 +176,7 @@ lock_path_is_safe() {
 }
 
 snapshot_metrics() (
-    local data_dir=$1 snapshot=$2 parent lock_path lock_fd csv
+    local data_dir=$1 parent lock_path lock_fd csv
     if [[ ! -d $data_dir ]]; then
         # An absent input directory is no data. An inaccessible parent or a
         # non-directory component is a path error.
@@ -182,9 +201,30 @@ snapshot_metrics() (
     csv=$data_dir/metrics.csv
     if [[ -e $csv || -L $csv ]]; then
         [[ -f $csv && ! -L $csv ]] || return 4
-        cat -- "$csv" > "$snapshot" || return 4
+        cat -- "$csv" > "$stage/metrics.csv" || return 4
     fi
+    snapshot_archives "$data_dir/archive"
 )
+
+snapshot_archives() {
+    local archive_dir=$1 archive name first_day last_day
+    [[ -e $archive_dir || -L $archive_dir ]] || return 0
+    [[ -d $archive_dir && ! -L $archive_dir && -r $archive_dir && -x $archive_dir ]] || return 4
+
+    # Filenames describe a complete calendar day in the rotation timezone.
+    # Allow every numeric UTC offset in CSV v1 when selecting candidates.
+    # The row timestamps decide exact membership after the snapshot.
+    first_day=$(date -u -d "@$((start - 86400))" +%F) || return 4
+    last_day=$(date -u -d "@$((end - 1 + 86400))" +%F) || return 4
+    for archive in "$archive_dir"/metrics-*.csv.gz; do
+        name=${archive##*/}
+        [[ $name =~ ^metrics-([0-9]{4}-[0-9]{2}-[0-9]{2})\.csv\.gz$ ]] || continue
+        [[ ${BASH_REMATCH[1]} < $first_day || ${BASH_REMATCH[1]} > $last_day ]] && continue
+        [[ -f $archive && ! -L $archive ]] || return 4
+        cat -- "$archive" > "$stage/$name" || return 4
+    done
+    return 0
+}
 
 timestamp_epoch() {
     local timestamp=$1
@@ -238,13 +278,47 @@ select_samples() {
     printf 'skipped\t%s\n' "$skipped" || return 4
 }
 
+collect_samples() {
+    local archive status
+    select_samples "$stage/metrics.csv" || return "$?"
+    for archive in "$stage"/metrics-*.csv.gz; do
+        [[ -f $archive ]] || continue
+        if ! gzip -t -- "$archive"; then
+            diagnostic "corrupt gzip archive ${archive##*/}"
+            return 3
+        fi
+        gzip -dc -- "$archive" > "$stage/archive.csv" || return 4
+        if [[ ! -s $stage/archive.csv ]]; then
+            diagnostic "invalid CSV header in archive ${archive##*/}"
+            return 3
+        fi
+        select_samples "$stage/archive.csv" || {
+            status=$?
+            diagnostic "could not parse archive ${archive##*/}"
+            return "$status"
+        }
+    done
+    return 0
+}
+
 summarize_samples() {
     awk -F '\t' -v cadence="${settings[WATCH_INTERVAL_SECONDS]}" '
-        $1 == "skipped" { skipped = $2; next }
+        $1 == "skipped" { skipped += $2; next }
+        count > 0 && $1 == last {
+            if ($2 == cpu && $3 == memory && $4 == disk) next
+            printf "report: conflicting measurements at Unix timestamp %s\n", $1 > "/dev/stderr"
+            conflict = 1
+            exit 3
+        }
         {
             if (count == 0) first = $1
-            else if ($1 - last > cadence) gaps++
+            else if ($1 - last > cadence) {
+                gaps++
+                print "" > "samples.tsv"
+            }
+            print $0 > "samples.tsv"
             last = $1
+            cpu = $2; memory = $3; disk = $4
             for (i = 2; i <= 4; i++) {
                 # Store exact tenths for sums and round only for display.
                 value = $i
@@ -257,6 +331,7 @@ summarize_samples() {
             count++
         }
         END {
+            if (conflict) exit 3
             printf "%d\t%d\t%d\t%s\t%s\n", count, skipped, gaps, first, last
             label[2] = "CPU"; label[3] = "Memory"; label[4] = "Disk"
             for (i = 2; i <= 4; i++) {
@@ -271,6 +346,59 @@ summarize_samples() {
     '
 }
 
+chart_ticks() {
+    local i tick label separator=''
+    for i in 0 1 2 3 4; do
+        tick=$((start + (end - start) * i / 4))
+        label=$(date -d "@$tick" '+%m-%d %H:%M %:z') || return 4
+        printf '%s"%s" %s' "$separator" "$label" "$tick" || return 4
+        separator=', '
+    done
+}
+
+render_chart() (
+    local ticks
+    ticks=$(chart_ticks) || return 4
+    cd -- "$stage" || return 4
+    # Only calendar labels and numeric values enter this fixed gnuplot script.
+    gnuplot -d <<EOF
+set terminal pngcairo size 1200,900 font "Sans,11"
+set output "chart.png"
+set multiplot layout 3,1 title "SysGuard ${period^} Report - $report_label"
+set xrange [$start:$end]
+set yrange [0:100]
+set xtics ($ticks)
+set grid
+set key top left
+set ylabel "CPU (%)"
+plot "samples.tsv" using 1:2 with linespoints pt 7 lc rgb "#2563ab" title "CPU utilization"
+set ylabel "Memory (%)"
+plot "samples.tsv" using 1:3 with linespoints pt 7 lc rgb "#20764f" title "Memory utilization"
+set ylabel "Disk (%)"
+set xlabel "Local time (UTC offsets shown)"
+plot "samples.tsv" using 1:4 with linespoints pt 7 lc rgb "#9e4422" title "Disk utilization"
+unset multiplot
+unset output
+EOF
+)
+
+publish_chart() {
+    local digest destination
+    digest=$(sha256sum < "$stage/chart.png") || return 4
+    chart_name=$period-$report_name-${digest%% *}.png
+    destination=$output_root/charts/$chart_name
+    mkdir -p -- "$output_root/charts" || return 4
+    # Keep old chart files addressable while their reports are being replaced.
+    if [[ -e $destination || -L $destination ]]; then
+        [[ -f $destination && ! -L $destination ]] && cmp -s -- "$stage/chart.png" "$destination" || return 4
+        return 0
+    fi
+    chart_stage=$(mktemp -- "$output_root/charts/.chart.XXXXXXXX") || return 4
+    cat -- "$stage/chart.png" > "$chart_stage" || return 4
+    mv -fT -- "$chart_stage" "$destination" || return 4
+    chart_stage=''
+}
+
 escape_html() {
     local value=$1
     value=${value//&/\&amp;}
@@ -282,7 +410,7 @@ escape_html() {
 }
 
 render_html() {
-    local summary=$1 count skipped gaps first last heading quality coverage
+    local summary=$1 count skipped gaps first last heading quality coverage chart=''
     local from until zone from_html until_html zone_html first_html last_html
     IFS=$'\t' read -r count skipped gaps first last <<< "${summary%%$'\n'*}"
     if (( count == 0 && skipped > 0 )); then
@@ -297,16 +425,17 @@ render_html() {
     zone_html=$(escape_html "$zone")
     heading='Sampling summary'
     quality=''
-    coverage='No valid samples in the active metrics log for this window.'
+    coverage='No valid samples in the available metrics logs for this window.'
     if (( skipped > 0 )); then
-        quality="<p><strong>Data quality warning.</strong> Skipped $skipped malformed or out-of-order rows in the active log.</p>"
-        diagnostic "skipped $skipped malformed or out-of-order rows in the active log"
+        quality="<p><strong>Data quality warning.</strong> Skipped $skipped malformed or out-of-order rows in the input logs.</p>"
+        diagnostic "skipped $skipped malformed or out-of-order rows in the input logs"
     fi
     if (( count > 0 )); then
         first=$(date -d "@$first" '+%F %T %:z') && last=$(date -d "@$last" '+%F %T %:z') || return 4
         first_html=$(escape_html "$first")
         last_html=$(escape_html "$last")
         coverage="Observed $first_html to $last_html. Intervals between valid samples longer than the configured watch interval (${settings[WATCH_INTERVAL_SECONDS]} seconds): $gaps."
+        chart="<figure><img src=\"../charts/$chart_name\" width=\"1200\" height=\"900\" alt=\"Three charts showing CPU, memory, and disk utilization over time\"><figcaption>CPU, memory, and disk utilization over time. Offsets are shown on the time axis.</figcaption></figure>"
     else
         heading='NO DATA'
     fi
@@ -317,16 +446,18 @@ render_html() {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SysGuard Daily Report — $report_date</title>
+  <title>SysGuard ${period^} Report — $report_label</title>
   <style>
     body { font: 1rem/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 52rem; padding: 0 1rem; }
     table { border-collapse: collapse; width: 100%; }
     th, td { border-bottom: 1px solid #ccc; padding: .5rem; text-align: left; }
+    figure { margin: 1rem 0; }
+    img { max-width: 100%; height: auto; }
   </style>
 </head>
 <body>
   <main>
-    <h1>SysGuard Daily Report — $report_date</h1>
+    <h1>SysGuard ${period^} Report — $report_label</h1>
     <p>Timezone: $zone_html</p>
     <p>Window: $from_html (inclusive) to $until_html (exclusive)</p>
     <h2>$heading</h2>
@@ -334,7 +465,7 @@ render_html() {
     <p>$coverage</p>
     $quality
     <table>
-      <caption>Utilization from valid samples in the active metrics log</caption>
+      <caption>Utilization from valid samples in the available metrics logs</caption>
       <thead>
         <tr><th scope="col">Metric</th><th scope="col">Count</th><th scope="col">Minimum</th><th scope="col">Maximum</th><th scope="col">Arithmetic average</th></tr>
       </thead>
@@ -342,6 +473,7 @@ render_html() {
 ${summary#*$'\n'}
       </tbody>
     </table>
+    $chart
   </main>
 </body>
 </html>
@@ -349,8 +481,12 @@ EOF
 }
 
 cleanup() {
+    if [[ $chart_stage ]]; then
+        rm -f -- "$chart_stage"
+    fi
     [[ $stage ]] || return 0
-    rm -f -- "$stage/metrics.csv" "$stage/report.html" && rmdir -- "$stage"
+    rm -f -- "$stage/metrics.csv" "$stage"/metrics-*.csv.gz "$stage/archive.csv" \
+        "$stage/candidates.tsv" "$stage/samples.tsv" "$stage/chart.png" "$stage/report.html" && rmdir -- "$stage"
 }
 
 main() {
@@ -362,14 +498,15 @@ main() {
     fi
 
     local -A options=() settings=()
-    local script_dir repo_root config data_dir output_dir report_date start end
+    local script_dir repo_root config data_dir output_root output_dir start end
+    local period report_date report_last report_name report_label chart_name=''
     local tool report_lock lock_fd summary status
     if ! parse_args "$@"; then
         diagnostic 'invalid arguments'
         usage >&2
         return 2
     fi
-    for tool in awk cat date flock mkdir mktemp mv rm rmdir; do
+    for tool in awk cat cmp date flock gzip mkdir mktemp mv rm rmdir sha256sum sort; do
         if ! command -v "$tool" >/dev/null; then
             diagnostic "required command unavailable: $tool"
             return 7
@@ -380,18 +517,19 @@ main() {
     repo_root=$(cd -P -- "$script_dir/.." && pwd -P) || return 4
     config=$(repo_path "${options[--config]:-config/local.conf}")
     data_dir=$(repo_path "${options[--data-dir]:-data}")
-    output_dir=$(repo_path "${options[--output-dir]:-reports}")/daily
+    output_root=$(repo_path "${options[--output-dir]:-reports}")
+    output_dir=$output_root/$period
     load_config "$config" || {
         status=$?
         diagnostic 'configuration could not be loaded or validated'
         return "$status"
     }
     if ! resolve_window; then
-        diagnostic 'invalid report date (expected a calendar date in YYYY-MM-DD)'
+        diagnostic 'invalid report date (expected a calendar date in YYYY-MM-DD, Monday for weekly)'
         return 3
     fi
     if (( settings[REPORT_PDF_ENABLED] )); then
-        diagnostic 'PDF generation is unavailable in Phase 2. Use REPORT_PDF_ENABLED=0 for daily HTML.'
+        diagnostic 'PDF generation is unavailable in this build. Use REPORT_PDF_ENABLED=0 for HTML.'
         return 7
     fi
 
@@ -409,32 +547,53 @@ main() {
         diagnostic 'could not stage the HTML in the output directory'
         return 4
     fi
-    snapshot_metrics "$data_dir" "$stage/metrics.csv" || {
+    snapshot_metrics "$data_dir" || {
         status=$?
-        diagnostic 'could not snapshot the active metrics log or acquire its lock'
+        diagnostic 'could not snapshot the metrics log or acquire its lock, or could not read an archive'
         return "$status"
     }
-    summary=$(select_samples "$stage/metrics.csv" | summarize_samples) || {
+    collect_samples > "$stage/candidates.tsv" || {
+        status=$?
+        (( status == 3 )) && return 3
+        diagnostic 'could not read the metrics snapshot'
+        return 4
+    }
+    summary=$(cd -- "$stage" && sort -k1,1n candidates.tsv | summarize_samples) || {
         status=$?
         (( status == 3 )) && return 3
         diagnostic 'could not read or summarize the CSV snapshot'
         return 4
     }
+    if [[ -s $stage/samples.tsv ]]; then
+        if ! command -v gnuplot >/dev/null; then
+            diagnostic 'required command unavailable: gnuplot'
+            return 7
+        fi
+        if ! render_chart || [[ ! -s $stage/chart.png ]]; then
+            diagnostic 'could not generate the gnuplot chart'
+            return 4
+        fi
+        publish_chart || {
+            diagnostic 'could not publish the chart'
+            return 4
+        }
+    fi
     render_html "$summary" > "$stage/report.html" || {
         status=$?
         (( status == 3 )) && return 3
         diagnostic 'could not write the HTML report'
         return 4
     }
-    mv -fT -- "$stage/report.html" "$output_dir/$report_date.html" || {
+    mv -fT -- "$stage/report.html" "$output_dir/$report_name.html" || {
         diagnostic 'could not publish the HTML report'
         return 4
     }
-    printf 'Wrote %s\n' "$output_dir/$report_date.html"
+    printf 'Wrote %s\n' "$output_dir/$report_name.html"
 }
 
 set -o pipefail
 stage=''
+chart_stage=''
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM

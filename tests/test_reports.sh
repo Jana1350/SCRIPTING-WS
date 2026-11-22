@@ -52,7 +52,7 @@ assert_metric() {
 assert_no_staging() {
     local -a stages
     shopt -s nullglob
-    stages=("$output/daily/".report.*)
+    stages=("$output/daily/".report.* "$output/weekly/".report.* "$output/charts/".chart.*)
     shopt -u nullglob
     [[ ${#stages[@]} == 0 ]] || fail 'staging files remain'
 }
@@ -69,7 +69,7 @@ expect_status 0 '' bash "$script" --help
 assert_contains 'Usage: report.sh daily' "$stdout"
 expect_status 2 'invalid arguments' bash "$script"
 expect_status 2 'invalid arguments' bash "$script" --help extra
-expect_status 2 'invalid arguments' bash "$script" weekly
+expect_status 2 'invalid arguments' bash "$script" monthly
 expect_status 2 'invalid arguments' report --unknown
 expect_status 2 'invalid arguments' report --date
 expect_status 2 'invalid arguments' report --date "$REPORT_DATE" --date "$REPORT_DATE"
@@ -185,7 +185,7 @@ SYSGUARD_TEST_REAL_DATE=$(command -v date)
 cat > "$work/test-bin/date" <<'EOF'
 #!/usr/bin/env bash
 if [[ $# == 1 && $1 == +%F ]]; then
-    printf '%s\n' 2026-11-21
+    printf '%s\n' "${SYSGUARD_TEST_TODAY:-2026-11-21}"
 else
     exec "$SYSGUARD_TEST_REAL_DATE" "$@"
 fi
@@ -220,8 +220,13 @@ expect_status 4 'output directory' bash "$script" daily --config "$config" --dat
 cp -- "$html" "$work/last-good.html"
 write_rows '2026-11-20T08:00:00+05:30,80.0,90.0,100.0'
 export SYSGUARD_TEST_PUBLISH_MARKER="$work/publish-attempt"
+export SYSGUARD_TEST_REAL_MV
+SYSGUARD_TEST_REAL_MV=$(command -v mv)
 cat > "$work/test-bin/mv" <<'EOF'
 #!/usr/bin/env bash
+if [[ $3 != */report.html ]]; then
+    exec "$SYSGUARD_TEST_REAL_MV" "$@"
+fi
 if grep -Fxq '</html>' "$3"; then
     printf '%s\n' 'complete staged HTML' > "$SYSGUARD_TEST_PUBLISH_MARKER"
 fi
@@ -229,6 +234,7 @@ exit 1
 EOF
 chmod +x -- "$work/test-bin/mv"
 PATH="$work/test-bin:$PATH" expect_status 4 'could not publish' report --date "$REPORT_DATE"
+rm -- "$work/test-bin/mv"
 assert_contains 'complete staged HTML' "$SYSGUARD_TEST_PUBLISH_MARKER"
 cmp -s -- "$work/last-good.html" "$html" || fail 'failed publication replaced a completed report'
 assert_no_staging
@@ -236,4 +242,120 @@ expect_status 0 '' report --date "$REPORT_DATE"
 assert_metric Disk 1 100.0% 100.0% 100.00%
 assert_no_staging
 printf '%s\n' 'PASS: output error and failed atomic replacement preserve the previous report and clean staging'
-printf '%s\n' 'All daily HTML report tests passed.'
+
+weekly_report() {
+    bash "$script" weekly --config "$config" --data-dir "$data" --output-dir "$output" "$@"
+}
+
+write_archive() {
+    local day=$1
+    shift
+    printf '%s\n' "$HEADER" "$@" | gzip -c > "$archive/metrics-$day.csv.gz"
+}
+
+verify_chart() {
+    local report_path=$1 relative path
+    relative=$(sed -n 's@.*<img src="\(\.\./charts/[^" ]*\.png\)".*@\1@p' "$report_path")
+    [[ $relative ]] || fail "chart reference is missing in $report_path"
+    path=${report_path%/*}/$relative
+    [[ $(file -b --mime-type -- "$path") == image/png ]] || fail "chart is not a PNG: $path"
+    printf '%s PNG: ' "${report_path##*/}"
+    file -b -- "$path"
+}
+
+# Preserve the Phase 2 daily assertions above and exercise the resulting chart.
+verify_chart "$html"
+readonly WEEK_START=2026-11-16
+weekly_html=$output/weekly/${WEEK_START}_to_2026-11-22.html
+archive=$data/archive
+mkdir -- "$archive"
+write_archive 2026-11-15 \
+    '2026-11-15T23:59:59+00:00,1.0,2.0,3.0' \
+    '2026-11-15T19:00:00-05:00,20.0,50.0,60.0'
+write_archive 2026-11-16 '2026-11-16T06:00:00+00:00,101.0,50.0,60.0'
+write_archive 2026-11-22 '2026-11-23T05:29:59+05:30,60.0,70.0,80.0'
+printf '%s\n' 'unrelated old archive' > "$archive/metrics-2026-01-01.csv.gz"
+write_rows \
+    '2026-11-16T05:30:00+05:30,20.0,50.0,60.0' \
+    '2026-11-20T12:00:00+00:00,40.0,60.0,70.0' \
+    '2026-11-23T00:00:00+00:00,99.0,99.0,99.0'
+
+TZ=UTC expect_status 0 'malformed or out-of-order rows' weekly_report --date "$WEEK_START"
+assert_contains 'SysGuard Weekly Report — 2026-11-16 to 2026-11-22' "$weekly_html"
+assert_contains '2026-11-16 00:00:00 +00:00 (inclusive) to 2026-11-23 00:00:00 +00:00 (exclusive)' "$weekly_html"
+assert_contains 'Skipped 1 malformed or out-of-order rows' "$weekly_html"
+html=$weekly_html
+assert_metric CPU 3 20.0% 60.0% 40.00%
+assert_metric Memory 3 50.0% 70.0% 60.00%
+assert_metric Disk 3 60.0% 80.0% 70.00%
+verify_chart "$weekly_html"
+cp -- "$weekly_html" "$work/weekly-good.html"
+TZ=UTC expect_status 3 'invalid report date' weekly_report --date 2026-11-17
+TZ=UTC expect_status 3 'invalid report date' weekly_report --date 2026-11-31
+TZ=UTC SYSGUARD_TEST_TODAY=2026-11-23 PATH="$work/test-bin:$PATH" \
+    expect_status 0 '' weekly_report
+cmp -s -- "$work/weekly-good.html" "$weekly_html" || fail 'Monday default differs from explicit week'
+TZ=UTC SYSGUARD_TEST_TODAY=2026-11-29 PATH="$work/test-bin:$PATH" \
+    expect_status 0 '' weekly_report
+cmp -s -- "$work/weekly-good.html" "$weekly_html" || fail 'Sunday default used the incomplete week'
+printf '%s\n' 'PASS: weekly dates and boundaries, archived malformed row, mixed offsets, exact overlap, and repeatable charts'
+
+# Distinct samples at the same instant in two sources are an integrity error.
+write_rows '2026-11-16T05:30:00+05:30,20.1,50.0,60.0'
+TZ=UTC expect_status 3 'conflicting measurements' weekly_report --date "$WEEK_START"
+cmp -s -- "$work/weekly-good.html" "$weekly_html" || fail 'conflict replaced completed HTML'
+printf '%s\n' 'corrupt matching archive' > "$archive/metrics-2026-11-19.csv.gz"
+TZ=UTC expect_status 3 'corrupt gzip archive metrics-2026-11-19.csv.gz' weekly_report --date "$WEEK_START"
+cmp -s -- "$work/weekly-good.html" "$weekly_html" || fail 'corrupt gzip replaced completed HTML'
+rm -- "$archive/metrics-2026-11-19.csv.gz" "$csv"
+TZ=UTC expect_status 0 '' weekly_report --date "$WEEK_START"
+assert_metric CPU 2 20.0% 60.0% 40.00%
+TZ=UTC expect_status 0 '' report --date "$WEEK_START"
+html=$output/daily/$WEEK_START.html
+assert_metric CPU 1 20.0% 20.0% 20.00%
+verify_chart "$html"
+write_archive 2026-12-07
+TZ=UTC expect_status 0 '' weekly_report --date 2026-12-07
+no_data_html=$output/weekly/2026-12-07_to_2026-12-13.html
+assert_contains 'NO DATA' "$no_data_html"
+if grep -Fq '<img ' "$no_data_html"; then
+    fail 'no-data report unexpectedly references a chart'
+fi
+printf '%s\n' 'PASS: conflicts and corrupt gzip fail explicitly; archive-only and header-only periods are handled'
+
+write_rows \
+    '2026-03-02T00:00:00-05:00,20.0,50.0,60.0' \
+    '2026-03-08T23:59:59-04:00,60.0,70.0,80.0' \
+    '2026-03-09T00:00:00-04:00,99.0,99.0,99.0'
+TZ=America/New_York expect_status 0 '' weekly_report --date 2026-03-02
+assert_contains '2026-03-02 00:00:00 -05:00 (inclusive) to 2026-03-09 00:00:00 -04:00 (exclusive)' \
+    "$output/weekly/2026-03-02_to_2026-03-08.html"
+assert_contains 'Valid samples: 2' "$output/weekly/2026-03-02_to_2026-03-08.html"
+printf '%s\n' 'PASS: weekly report uses calendar boundaries across a DST transition'
+
+mkdir -- "$work/without-gnuplot" "$work/failing-chart" "$work/blocked-chart-output"
+for utility in awk bash cat cmp date flock grep gzip mkdir mktemp mv rm rmdir sha256sum sort; do
+    ln -s -- "$(command -v "$utility")" "$work/without-gnuplot/$utility"
+done
+write_rows '2026-11-20T12:00:00+00:00,40.0,60.0,70.0'
+cp -- "$weekly_html" "$work/before-chart-errors.html"
+TZ=UTC PATH="$work/without-gnuplot" expect_status 7 'required command unavailable: gnuplot' \
+    weekly_report --date "$WEEK_START"
+cmp -s -- "$work/before-chart-errors.html" "$weekly_html" || fail 'missing gnuplot replaced completed HTML'
+cat > "$work/failing-chart/gnuplot" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'incomplete chart' > chart.png
+exit 1
+EOF
+chmod +x -- "$work/failing-chart/gnuplot"
+TZ=UTC PATH="$work/failing-chart:$PATH" expect_status 4 'could not generate the gnuplot chart' \
+    weekly_report --date "$WEEK_START"
+cmp -s -- "$work/before-chart-errors.html" "$weekly_html" || fail 'failed gnuplot replaced completed HTML'
+verify_chart "$weekly_html"
+printf '%s\n' 'regular file' > "$work/blocked-chart-output/charts"
+TZ=UTC expect_status 4 'could not publish the chart' bash "$script" weekly --config "$config" \
+    --data-dir "$data" --output-dir "$work/blocked-chart-output" --date "$WEEK_START"
+[[ ! -e $work/blocked-chart-output/weekly/${weekly_html##*/} ]] || fail 'HTML published despite chart output failure'
+assert_no_staging
+printf '%s\n' 'PASS: missing gnuplot, chart rendering failure, and chart publication failure preserve report integrity'
+printf '%s\n' 'All daily and weekly HTML report tests passed.'
