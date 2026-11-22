@@ -12,7 +12,7 @@ usage() {
         'Daily defaults to the previous completed local day.' \
         'Weekly defaults to the previous completed Monday–Sunday. An explicit date must be a Monday.' \
         'Dates use TZ or the system timezone. Relative paths resolve from the repository root.' \
-        'HTML reports require REPORT_PDF_ENABLED=0.'
+        'REPORT_PDF_ENABLED=1 adds a PDF report using WeasyPrint.'
 }
 
 parse_args() {
@@ -383,10 +383,7 @@ EOF
 )
 
 publish_chart() {
-    local digest destination
-    digest=$(sha256sum < "$stage/chart.png") || return 4
-    chart_name=$period-$report_name-${digest%% *}.png
-    destination=$output_root/charts/$chart_name
+    local destination=$output_root/charts/$chart_name
     mkdir -p -- "$output_root/charts" || return 4
     # Keep old chart files addressable while their reports are being replaced.
     if [[ -e $destination || -L $destination ]]; then
@@ -453,6 +450,10 @@ render_html() {
     th, td { border-bottom: 1px solid #ccc; padding: .5rem; text-align: left; }
     figure { margin: 1rem 0; }
     img { max-width: 100%; height: auto; }
+    @media print {
+      body { margin: 0; max-width: none; }
+      figure { break-inside: avoid; }
+    }
   </style>
 </head>
 <body>
@@ -480,13 +481,104 @@ ${summary#*$'\n'}
 EOF
 }
 
+render_pdf() {
+    local pdf=$stage/report.pdf info
+    if ! grep -Fxq -- '</html>' "$stage/report.html"; then
+        diagnostic 'staged HTML is incomplete'
+        return 4
+    fi
+    if [[ $chart_name ]]; then
+        if [[ $(file -b --mime-type -- "$stage/chart.png") != image/png ]] ||
+            ! grep -Fq -- "src=\"../charts/$chart_name\"" "$stage/report.html"; then
+            diagnostic 'staged chart is invalid or missing from the HTML'
+            return 4
+        fi
+        # Give the staged HTML the same relative chart layout it will have
+        # after publication. Conversion reads only private, local files.
+        if ! { mkdir -- "$stage/charts" && ln -T -- "$stage/chart.png" "$stage/charts/$chart_name"; }; then
+            diagnostic 'could not stage the chart for PDF conversion'
+            return 4
+        fi
+    fi
+    if ! weasyprint --allowed-protocols file --base-url "$stage/$period/" "$stage/report.html" "$pdf"; then
+        diagnostic 'WeasyPrint could not convert the HTML report'
+        return 4
+    fi
+    if [[ ! -f $pdf || -L $pdf || $(file -b --mime-type -- "$pdf") != application/pdf ]] ||
+        ! tail -c 8 -- "$pdf" | grep -aFxq -- '%%EOF' ||
+        ! info=$(pdfinfo "$pdf") || ! grep -Eq '^Pages:[[:space:]]+[1-9][0-9]*[[:space:]]*$' <<< "$info"; then
+        diagnostic 'WeasyPrint produced an invalid or incomplete PDF'
+        return 4
+    fi
+    # WeasyPrint may succeed even when it could not load an image. Check that
+    # the gnuplot figure is an actual image in the document.
+    if [[ $chart_name ]] && ! pdfimages -list "$pdf" | awk '
+        $3 == "image" && $4 == 1200 && $5 == 900 { chart = 1 }
+        END { exit !chart }
+    '; then
+        diagnostic 'PDF is missing the embedded gnuplot chart'
+        return 4
+    fi
+}
+
+publish_reports() {
+    local html=$output_dir/$report_name.html pdf=$output_dir/$report_name.pdf
+    if (( settings[REPORT_PDF_ENABLED] )); then
+        if [[ -e $pdf || -L $pdf ]]; then
+            if ! { [[ -f $pdf || -L $pdf ]] && ln -PT -- "$pdf" "$stage/previous.pdf"; }; then
+                diagnostic 'could not preserve the previous PDF before publication'
+                return 4
+            fi
+        fi
+        pending_pdf=$pdf
+        if ! mv -fT -- "$stage/report.pdf" "$pdf"; then
+            diagnostic 'could not publish the PDF report'
+            return 4
+        fi
+    fi
+    if ! mv -fT -- "$stage/report.html" "$html"; then
+        diagnostic 'could not publish the HTML report'
+        return 4
+    fi
+    pending_pdf=''
+    printf 'Wrote %s\n' "$html"
+    if (( settings[REPORT_PDF_ENABLED] )); then
+        printf 'Wrote %s\n' "$pdf"
+    fi
+}
+
+rollback_pdf() {
+    # A successful same-filesystem rename removes its staged source. Roll
+    # back only if the PDF moved and the HTML did not, including on trapped
+    # signals. Untrappable interruption between the renames can expose both
+    # generations at once.
+    [[ $pending_pdf && ! -e $stage/report.pdf && -e $stage/report.html ]] || return 0
+    if [[ -e $stage/previous.pdf || -L $stage/previous.pdf ]]; then
+        if ! mv -fT -- "$stage/previous.pdf" "$pending_pdf"; then
+            diagnostic "could not restore the previous PDF; backup retained at $stage/previous.pdf"
+            return 4
+        fi
+    elif ! rm -f -- "$pending_pdf"; then
+        diagnostic 'could not remove the new PDF after HTML publication failed'
+        return 4
+    fi
+}
+
 cleanup() {
+    local keep_backup=0
     if [[ $chart_stage ]]; then
         rm -f -- "$chart_stage"
     fi
     [[ $stage ]] || return 0
+    rollback_pdf || keep_backup=1
+    if [[ -d $stage/charts ]]; then
+        rm -f -- "$stage"/charts/*.png && rmdir -- "$stage/charts"
+    fi
     rm -f -- "$stage/metrics.csv" "$stage"/metrics-*.csv.gz "$stage/archive.csv" \
-        "$stage/candidates.tsv" "$stage/samples.tsv" "$stage/chart.png" "$stage/report.html" && rmdir -- "$stage"
+        "$stage/candidates.tsv" "$stage/samples.tsv" "$stage/chart.png" "$stage/report.html" "$stage/report.pdf"
+    if (( ! keep_backup )); then
+        rm -f -- "$stage/previous.pdf" && rmdir -- "$stage"
+    fi
 }
 
 main() {
@@ -500,7 +592,7 @@ main() {
     local -A options=() settings=()
     local script_dir repo_root config data_dir output_root output_dir start end
     local period report_date report_last report_name report_label chart_name=''
-    local tool report_lock lock_fd summary status
+    local tool report_lock lock_fd summary status chart_digest
     if ! parse_args "$@"; then
         diagnostic 'invalid arguments'
         usage >&2
@@ -529,8 +621,12 @@ main() {
         return 3
     fi
     if (( settings[REPORT_PDF_ENABLED] )); then
-        diagnostic 'PDF generation is unavailable in this build. Use REPORT_PDF_ENABLED=0 for HTML.'
-        return 7
+        for tool in weasyprint file grep ln pdfinfo pdfimages tail; do
+            if ! command -v "$tool" >/dev/null; then
+                diagnostic "required command unavailable: $tool"
+                return 7
+            fi
+        done
     fi
 
     report_lock=$repo_root/runtime/report.lock
@@ -573,10 +669,11 @@ main() {
             diagnostic 'could not generate the gnuplot chart'
             return 4
         fi
-        publish_chart || {
-            diagnostic 'could not publish the chart'
+        chart_digest=$(sha256sum < "$stage/chart.png") || {
+            diagnostic 'could not read the staged chart'
             return 4
         }
+        chart_name=$period-$report_name-${chart_digest%% *}.png
     fi
     render_html "$summary" > "$stage/report.html" || {
         status=$?
@@ -584,16 +681,20 @@ main() {
         diagnostic 'could not write the HTML report'
         return 4
     }
-    mv -fT -- "$stage/report.html" "$output_dir/$report_name.html" || {
-        diagnostic 'could not publish the HTML report'
+    if (( settings[REPORT_PDF_ENABLED] )); then
+        render_pdf || return "$?"
+    fi
+    if [[ $chart_name ]] && ! publish_chart; then
+        diagnostic 'could not publish the chart'
         return 4
-    }
-    printf 'Wrote %s\n' "$output_dir/$report_name.html"
+    fi
+    publish_reports
 }
 
 set -o pipefail
 stage=''
 chart_stage=''
+pending_pdf=''
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM

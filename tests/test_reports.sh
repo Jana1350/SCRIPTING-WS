@@ -7,6 +7,7 @@ readonly REPORT_DATE=2026-11-20
 repo_root=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 work=$(mktemp -d /tmp/sysguard-test-reports.XXXXXXXX)
 trap 'find "$work" -depth -delete' EXIT
+export XDG_CACHE_HOME="$work/cache"
 
 # A private checkout layout keeps even the default report lock and output
 # paths away from the production repository.
@@ -77,7 +78,11 @@ expect_status 2 'invalid arguments' report --date "$REPORT_DATE" extra
 expect_status 3 'invalid report date' report --date 2026-02-29
 expect_status 3 'invalid report date' report --date 2026-11-2
 expect_status 2 'configuration' bash "$script" daily --config "$work/missing.conf"
-expect_status 7 'PDF generation is unavailable' bash "$script" daily --data-dir "$data" --output-dir "$output"
+sed '/^REPORT_PDF_ENABLED=/d' "$repo_root/config/defaults.conf" > "$checkout/config/defaults.conf"
+expect_status 2 'configuration' bash "$script" daily --date "$REPORT_DATE"
+cp -- "$repo_root/config/defaults.conf" "$checkout/config/defaults.conf"
+printf '%s\n' 'REPORT_PDF_ENABLED=2' > "$work/invalid.conf"
+expect_status 2 'configuration' bash "$script" daily --config "$work/invalid.conf"
 printf '%s\n' 'REPORT_PDF_ENABLED=0' 'REPORT_PDF_ENABLED=0' > "$work/invalid.conf"
 expect_status 2 'configuration' bash "$script" daily --config "$work/invalid.conf"
 cat > "$work/invalid.conf" <<'EOF'
@@ -358,4 +363,177 @@ TZ=UTC expect_status 4 'could not publish the chart' bash "$script" weekly --con
 [[ ! -e $work/blocked-chart-output/weekly/${weekly_html##*/} ]] || fail 'HTML published despite chart output failure'
 assert_no_staging
 printf '%s\n' 'PASS: missing gnuplot, chart rendering failure, and chart publication failure preserve report integrity'
-printf '%s\n' 'All daily and weekly HTML report tests passed.'
+
+pdf_report() {
+    local pdf_period=$1
+    shift
+    bash "$script" "$pdf_period" --data-dir "$data" --output-dir "$output" "$@"
+}
+
+verify_pdf() {
+    local pdf=$1 title=$2 images=$3
+    [[ $(file -b --mime-type -- "$pdf") == application/pdf ]] || fail "not a PDF: $pdf"
+    printf '%s: ' "${pdf##*/}"
+    file -b -- "$pdf"
+    pdfinfo "$pdf" > "$work/pdf-info"
+    assert_contains "$title" "$work/pdf-info"
+    assert_contains 'WeasyPrint' "$work/pdf-info"
+    grep -E '^Pages:[[:space:]]+[1-9][0-9]*$' "$work/pdf-info" || fail 'PDF has no readable pages'
+    pdfimages -list "$pdf" > "$work/pdf-images"
+    awk -v expected="$images" '
+        $3 == "image" && $4 == 1200 && $5 == 900 { charts++ }
+        $3 == "image" { total++ }
+        END { exit !(charts == expected && total == expected) }
+    ' "$work/pdf-images" || fail "unexpected PDF image inventory for $pdf"
+    printf 'Embedded 1200 x 900 charts: %d\n' "$images"
+    pdftotext -layout "$pdf" "$work/pdf-text"
+}
+
+verify_pdf_statistics() {
+    assert_contains 'Timezone: Asia/Kolkata' "$work/pdf-text"
+    assert_contains 'Valid samples: 3' "$work/pdf-text"
+    assert_contains 'Data quality warning.' "$work/pdf-text"
+    assert_contains 'Skipped 1' "$work/pdf-text"
+    grep -Eq 'CPU[[:space:]]+3[[:space:]]+20\.0%[[:space:]]+60\.0%[[:space:]]+40\.00%' "$work/pdf-text" || fail 'CPU PDF statistics differ'
+    grep -Eq 'Memory[[:space:]]+3[[:space:]]+50\.0%[[:space:]]+70\.0%[[:space:]]+60\.00%' "$work/pdf-text" || fail 'memory PDF statistics differ'
+    grep -Eq 'Disk[[:space:]]+3[[:space:]]+60\.0%[[:space:]]+80\.0%[[:space:]]+70\.00%' "$work/pdf-text" || fail 'disk PDF statistics differ'
+}
+
+data=$checkout/pdf-data
+csv=$data/metrics.csv
+output="$checkout/pdf output"
+html=$output/daily/$REPORT_DATE.html
+daily_pdf=${html%.html}.pdf
+weekly_pdf=$output/weekly/${WEEK_START}_to_2026-11-22.pdf
+pdf_config=$checkout/pdf-enabled.conf
+printf '%s\n' 'REPORT_PDF_ENABLED=1' > "$pdf_config"
+mkdir -- "$data" "$work/without-weasyprint"
+for utility in awk bash cat cmp date file flock gnuplot grep gzip ln mkdir mktemp mv pdfimages pdfinfo rm rmdir sha256sum sort tail; do
+    ln -s -- "$(command -v "$utility")" "$work/without-weasyprint/$utility"
+done
+write_rows \
+    '2026-11-20T08:00:00+05:30,20.0,50.0,60.0' \
+    '2026-11-20T09:00:00+05:30,101.0,50.0,60.0' \
+    '2026-11-20T12:00:00+05:30,40.0,60.0,70.0' \
+    '2026-11-20T18:00:00+05:30,60.0,70.0,80.0'
+PATH="$work/without-weasyprint" expect_status 7 'required command unavailable: weasyprint' \
+    pdf_report daily --date "$REPORT_DATE"
+[[ ! -e $output ]] || fail 'missing WeasyPrint created report output'
+PATH="$work/without-weasyprint" expect_status 0 '' report --date "$REPORT_DATE"
+[[ -f $html && ! -e $daily_pdf ]] || fail 'HTML-only run requires WeasyPrint or left a PDF'
+verify_chart "$html"
+expect_status 0 '' pdf_report daily --date "$REPORT_DATE"
+verify_pdf "$daily_pdf" 'SysGuard Daily Report — 2026-11-20' 1
+verify_pdf_statistics
+assert_contains '2026-11-21 00:00:00' "$work/pdf-text"
+expect_status 0 '' pdf_report weekly --config "$pdf_config" --date "$WEEK_START"
+verify_pdf "$weekly_pdf" 'SysGuard Weekly Report — 2026-11-16 to 2026-11-22' 1
+verify_pdf_statistics
+assert_contains '2026-11-23 00:00:00' "$work/pdf-text"
+cp -- "$work/pdf-text" "$work/weekly-pdf-text"
+expect_status 0 '' pdf_report weekly --config "$pdf_config" --date "$WEEK_START"
+pdftotext -layout "$weekly_pdf" "$work/pdf-text"
+cmp -s -- "$work/weekly-pdf-text" "$work/pdf-text" || fail 'repeated PDF has different content'
+printf '%s\n' 'PASS: daily and weekly PDF content, statistics, warnings, embedded charts, and repeat generation'
+
+mkdir -- "$checkout/empty-pdf-data"
+for empty_period in daily weekly; do
+    expect_status 0 '' bash "$script" "$empty_period" --config "$pdf_config" --date 2026-12-07 \
+        --data-dir "$checkout/empty-pdf-data" --output-dir "$output"
+    if [[ $empty_period == daily ]]; then
+        verify_pdf "$output/daily/2026-12-07.pdf" 'SysGuard Daily Report — 2026-12-07' 0
+    else
+        verify_pdf "$output/weekly/2026-12-07_to_2026-12-13.pdf" 'SysGuard Weekly Report — 2026-12-07 to 2026-12-13' 0
+    fi
+    assert_contains 'NO DATA' "$work/pdf-text"
+    assert_contains 'Valid samples: 0' "$work/pdf-text"
+    assert_contains 'N/A' "$work/pdf-text"
+done
+printf '%s\n' 'PASS: daily and weekly NO DATA PDFs with no embedded charts'
+
+export SYSGUARD_TEST_OLD_HTML="$work/previous.html" SYSGUARD_TEST_OLD_PDF="$work/previous.pdf"
+cp -- "$html" "$SYSGUARD_TEST_OLD_HTML"
+cp -- "$daily_pdf" "$SYSGUARD_TEST_OLD_PDF"
+write_rows '2026-11-20T08:00:00+05:30,80.0,90.0,100.0'
+
+assert_previous_report() {
+    cmp -s -- "$SYSGUARD_TEST_OLD_HTML" "$html" || fail 'failure replaced the previous HTML'
+    cmp -s -- "$SYSGUARD_TEST_OLD_PDF" "$daily_pdf" || fail 'failure replaced the previous PDF'
+    assert_no_staging
+}
+
+mkdir -- "$work/pdf-faults"
+export SYSGUARD_TEST_REAL_WEASYPRINT
+SYSGUARD_TEST_REAL_WEASYPRINT=$(command -v weasyprint)
+cat > "$work/pdf-faults/weasyprint" <<'EOF'
+#!/usr/bin/env bash
+case ${SYSGUARD_TEST_CONVERTER_FAULT-} in
+    failure)
+        printf 'partial conversion\n' > "${!#}"
+        exit 1
+        ;;
+    corrupt)
+        printf '%s\n' '%PDF-1.7' 'broken PDF structure' '%%EOF' > "${!#}"
+        ;;
+    missing-chart)
+        input=${@: -2:1}
+        rm -- "${input%/*}"/charts/*.png || exit 1
+        exec "$SYSGUARD_TEST_REAL_WEASYPRINT" "$@"
+        ;;
+    *) exec "$SYSGUARD_TEST_REAL_WEASYPRINT" "$@" ;;
+esac
+EOF
+chmod +x -- "$work/pdf-faults/weasyprint"
+SYSGUARD_TEST_CONVERTER_FAULT=failure PATH="$work/pdf-faults:$PATH" \
+    expect_status 4 'WeasyPrint could not convert' pdf_report daily --date "$REPORT_DATE"
+assert_previous_report
+SYSGUARD_TEST_CONVERTER_FAULT=corrupt PATH="$work/pdf-faults:$PATH" \
+    expect_status 4 'invalid or incomplete PDF' pdf_report daily --date "$REPORT_DATE"
+assert_previous_report
+SYSGUARD_TEST_CONVERTER_FAULT=missing-chart PATH="$work/pdf-faults:$PATH" \
+    expect_status 4 'PDF is missing the embedded gnuplot chart' pdf_report daily --date "$REPORT_DATE"
+assert_previous_report
+expect_status 4 'output directory' bash "$script" daily --config "$pdf_config" --date "$REPORT_DATE" \
+    --data-dir "$data" --output-dir "$work/blocked-output"
+assert_previous_report
+printf '%s\n' 'PASS: conversion, invalid PDF, missing chart, and output directory errors preserve the previous report'
+
+export SYSGUARD_TEST_PUBLICATION_OBSERVATION="$work/publication-observation"
+cat > "$work/pdf-faults/mv" <<'EOF'
+#!/usr/bin/env bash
+case ${SYSGUARD_TEST_FAIL_RENAME-}:$3 in
+    pdf:*/report.pdf) exit 1 ;;
+    html:*/report.html)
+        # Observe the real inter-rename window using only temporary reports.
+        # Then return a handled error so the publisher can roll back.
+        if cmp -s -- "$4" "$SYSGUARD_TEST_OLD_HTML" &&
+            ! cmp -s -- "${4%.html}.pdf" "$SYSGUARD_TEST_OLD_PDF" &&
+            pdfinfo "${4%.html}.pdf" > /dev/null; then
+            printf '%s\n' 'old HTML and new PDF observed between renames' > "$SYSGUARD_TEST_PUBLICATION_OBSERVATION"
+        fi
+        exit 1
+        ;;
+    first-html:*/report.html) exit 1 ;;
+esac
+exec "$SYSGUARD_TEST_REAL_MV" "$@"
+EOF
+chmod +x -- "$work/pdf-faults/mv"
+SYSGUARD_TEST_FAIL_RENAME=pdf PATH="$work/pdf-faults:$PATH" \
+    expect_status 4 'could not publish the PDF report' pdf_report daily --date "$REPORT_DATE"
+assert_previous_report
+SYSGUARD_TEST_FAIL_RENAME=html PATH="$work/pdf-faults:$PATH" \
+    expect_status 4 'could not publish the HTML report' pdf_report daily --date "$REPORT_DATE"
+assert_contains 'old HTML and new PDF observed between renames' "$SYSGUARD_TEST_PUBLICATION_OBSERVATION"
+cat -- "$SYSGUARD_TEST_PUBLICATION_OBSERVATION"
+assert_previous_report
+verify_chart "$html"
+SYSGUARD_TEST_FAIL_RENAME=first-html PATH="$work/pdf-faults:$PATH" \
+    expect_status 4 'could not publish the HTML report' bash "$script" daily --config "$pdf_config" \
+    --date "$REPORT_DATE" --data-dir "$data" --output-dir "$work/first-publication"
+[[ ! -e $work/first-publication/daily/$REPORT_DATE.pdf && ! -e $work/first-publication/daily/$REPORT_DATE.html ]] ||
+    fail 'first failed publication left a final PDF or HTML'
+PATH="$work/without-weasyprint" expect_status 0 '' report --date "$REPORT_DATE"
+cmp -s -- "$SYSGUARD_TEST_OLD_PDF" "$daily_pdf" || fail 'HTML-only regeneration changed the previous PDF'
+assert_contains 'Valid samples: 1' "$html"
+printf '%s\n' 'PASS: PDF-first publication, rollback with and without a prior PDF, and HTML-only regeneration'
+printf '%s\n' 'All daily and weekly report tests passed.'
