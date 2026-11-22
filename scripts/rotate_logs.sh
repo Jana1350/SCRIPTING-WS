@@ -396,7 +396,13 @@ main() {
         return 4
     }
     archive_dir=$data_dir/archive
-    if [[ -d $data_dir ]]; then
+    # The writer can create the directory at any time. A real rotation must
+    # hold its lock before inspecting the active CSV, even on first use.
+    if (( ! dry_run )) && ! mkdir -p -- "$data_dir"; then
+        diagnostic 'could not initialize the data directory'
+        return 4
+    fi
+    if (( ! dry_run )) || [[ -d $data_dir ]]; then
         acquire_metrics_lock || {
             status=$?
             diagnostic 'could not acquire the shared metrics lock'

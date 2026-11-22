@@ -101,6 +101,8 @@ expect_status 0 '' report --date "$REPORT_DATE"
 assert_contains 'SysGuard Daily Report — 2026-11-20' "$html"
 assert_contains 'Timezone: Asia/Kolkata' "$html"
 assert_contains 'Valid samples: 3' "$html"
+assert_contains 'Leading gap: 28800 s.' "$html"
+assert_contains 'Trailing gap: 21600 s to the exclusive end.' "$html"
 assert_metric CPU 3 20.0% 60.0% 40.00%
 assert_metric Memory 3 50.0% 70.0% 60.00%
 assert_metric Disk 3 60.0% 80.0% 70.00%
@@ -134,6 +136,7 @@ rm -- "$csv"
 expect_status 0 '' report --date "$REPORT_DATE"
 assert_contains 'NO DATA' "$html"
 assert_contains 'Valid samples: 0' "$html"
+assert_contains 'Unobserved window: 86400 seconds.' "$html"
 assert_metric CPU 0 N/A N/A N/A
 printf '%s\n' "$HEADER" > "$csv"
 expect_status 0 '' report --date "$REPORT_DATE"
@@ -175,6 +178,8 @@ write_rows \
 TZ=UTC expect_status 0 '' report --date "$REPORT_DATE"
 assert_contains '2026-11-20 00:00:00 +00:00 (inclusive)' "$html"
 assert_metric CPU 2 20.0% 60.0% 40.00%
+assert_contains 'Leading gap: 0 s.' "$html"
+assert_contains 'Trailing gap: 1 s to the exclusive end.' "$html"
 write_rows \
     '2026-03-08T00:00:00-05:00,20.0,50.0,60.0' \
     '2026-03-08T23:59:59-04:00,60.0,70.0,80.0' \
@@ -205,7 +210,7 @@ chmod +x -- "$work/test-bin/date"
 PATH="$work/test-bin:$PATH" expect_status 0 '' report
 assert_metric CPU 1 20.0% 20.0% 20.00%
 [[ ! -e $output/daily/2026-11-21.html ]] || fail 'default report used the current date'
-printf '%s\n' 'PASS: inclusive start, exclusive end, mixed offsets, DST, and previous local day default'
+printf '%s\n' 'PASS: date and DST boundaries, previous-day default, and leading, trailing, or empty coverage'
 
 exec {held}>> "$data/.metrics.lock"
 flock -n -x "$held"
@@ -432,15 +437,19 @@ expect_status 0 '' pdf_report daily --date "$REPORT_DATE"
 verify_pdf "$daily_pdf" 'SysGuard Daily Report — 2026-11-20' 1
 verify_pdf_statistics
 assert_contains '2026-11-21 00:00:00' "$work/pdf-text"
+assert_contains 'Leading gap: 28800 s.' "$work/pdf-text"
+assert_contains 'Trailing gap: 21600 s' "$work/pdf-text"
 expect_status 0 '' pdf_report weekly --config "$pdf_config" --date "$WEEK_START"
 verify_pdf "$weekly_pdf" 'SysGuard Weekly Report — 2026-11-16 to 2026-11-22' 1
 verify_pdf_statistics
 assert_contains '2026-11-23 00:00:00' "$work/pdf-text"
+assert_contains 'Leading gap: 374400 s.' "$work/pdf-text"
+assert_contains 'Trailing gap: 194400 s' "$work/pdf-text"
 cp -- "$work/pdf-text" "$work/weekly-pdf-text"
 expect_status 0 '' pdf_report weekly --config "$pdf_config" --date "$WEEK_START"
 pdftotext -layout "$weekly_pdf" "$work/pdf-text"
 cmp -s -- "$work/weekly-pdf-text" "$work/pdf-text" || fail 'repeated PDF has different content'
-printf '%s\n' 'PASS: daily and weekly PDF content, statistics, warnings, embedded charts, and repeat generation'
+printf '%s\n' 'PASS: daily and weekly PDF content, statistics, coverage, embedded charts, and repeat generation'
 
 mkdir -- "$checkout/empty-pdf-data"
 for empty_period in daily weekly; do
@@ -448,8 +457,10 @@ for empty_period in daily weekly; do
         --data-dir "$checkout/empty-pdf-data" --output-dir "$output"
     if [[ $empty_period == daily ]]; then
         verify_pdf "$output/daily/2026-12-07.pdf" 'SysGuard Daily Report — 2026-12-07' 0
+        assert_contains 'Unobserved window: 86400 seconds.' "$work/pdf-text"
     else
         verify_pdf "$output/weekly/2026-12-07_to_2026-12-13.pdf" 'SysGuard Weekly Report — 2026-12-07 to 2026-12-13' 0
+        assert_contains 'Unobserved window: 604800 seconds.' "$work/pdf-text"
     fi
     assert_contains 'NO DATA' "$work/pdf-text"
     assert_contains 'Valid samples: 0' "$work/pdf-text"
@@ -468,12 +479,74 @@ assert_previous_report() {
     assert_no_staging
 }
 
+mkdir -- "$work/snapshot-faults"
+export SYSGUARD_TEST_REAL_CAT
+SYSGUARD_TEST_REAL_CAT=$(command -v cat)
+export SYSGUARD_TEST_SNAPSHOT_SOURCE=$csv
+cat > "$work/snapshot-faults/cat" <<'EOF'
+#!/usr/bin/env bash
+if [[ ${2-} == "$SYSGUARD_TEST_SNAPSHOT_SOURCE" ]]; then
+    case $SYSGUARD_TEST_SNAPSHOT_FAULT in
+        read-error) head -n 2 -- "$2"; exit 1 ;;
+        short-csv) exec head -n 2 -- "$2" ;;
+        short-gzip) exec head -c 8 -- "$2" ;;
+    esac
+fi
+exec "$SYSGUARD_TEST_REAL_CAT" "$@"
+EOF
+chmod +x -- "$work/snapshot-faults/cat"
+write_rows '2026-11-20T08:00:00+05:30,80.0,90.0,100.0' '2026-11-20T09:00:00+05:30,81.0,91.0,99.0'
+for snapshot_fault in read-error short-csv; do
+    SYSGUARD_TEST_SNAPSHOT_FAULT=$snapshot_fault PATH="$work/snapshot-faults:$PATH" \
+        expect_status 4 'could not verify snapshot' report --date "$REPORT_DATE"
+    assert_previous_report
+done
+mkdir -- "$data/archive"
+gzip -c -- "$csv" > "$data/archive/metrics-$REPORT_DATE.csv.gz"
+SYSGUARD_TEST_SNAPSHOT_SOURCE="$data/archive/metrics-$REPORT_DATE.csv.gz" \
+    SYSGUARD_TEST_SNAPSHOT_FAULT=short-gzip PATH="$work/snapshot-faults:$PATH" \
+    expect_status 4 'could not verify snapshot' report --date "$REPORT_DATE"
+assert_previous_report
+rm -- "$data/archive/metrics-$REPORT_DATE.csv.gz"
+cat > "$work/snapshot-eof" <<'EOF'
+fixture_reads=0
+read() {
+    if [[ ${FUNCNAME[1]-} == select_samples && ${!#} == line ]]; then
+        fixture_reads=$((fixture_reads + 1))
+        if (( fixture_reads > 1 )); then
+            printf -v line '%s' ''
+            return 1
+        fi
+    fi
+    builtin read "$@"
+}
+EOF
+BASH_ENV="$work/snapshot-eof" expect_status 4 'incomplete CSV snapshot read' report --date "$REPORT_DATE"
+assert_previous_report
+printf '%s\n%s' "$HEADER" '2026-11-20T08:00:00+05:30,80.0,90.0,100.0' > "$csv"
+expect_status 3 'missing final newline' report --date "$REPORT_DATE"
+assert_previous_report
+write_rows '2026-11-20T08:00:00+05:30,80.0,90.0,100.0'
+printf '%s\n' 'PASS: copy failures, short CSV and gzip snapshots, premature EOF, and truncated rows preserve completed reports'
+
 mkdir -- "$work/pdf-faults"
 export SYSGUARD_TEST_REAL_WEASYPRINT
 SYSGUARD_TEST_REAL_WEASYPRINT=$(command -v weasyprint)
+export SYSGUARD_TEST_CONVERSION_ATTEMPT="$work/unsupported-attempt"
 cat > "$work/pdf-faults/weasyprint" <<'EOF'
 #!/usr/bin/env bash
+if [[ ${!#} == --help ]]; then
+    case ${SYSGUARD_TEST_CONVERTER_FAULT-} in
+        rejects-option) printf '%s\n' 'unrecognized arguments: --allowed-protocols' >&2; exit 2 ;;
+        old-help) printf '%s\n' '  -u BASE_URL, --base-url BASE_URL'; exit 0 ;;
+        *) exec "$SYSGUARD_TEST_REAL_WEASYPRINT" "$@" ;;
+    esac
+fi
 case ${SYSGUARD_TEST_CONVERTER_FAULT-} in
+    rejects-option|old-help)
+        printf '%s\n' 'conversion attempted' > "$SYSGUARD_TEST_CONVERSION_ATTEMPT"
+        exit 2
+        ;;
     failure)
         printf 'partial conversion\n' > "${!#}"
         exit 1
@@ -490,6 +563,13 @@ case ${SYSGUARD_TEST_CONVERTER_FAULT-} in
 esac
 EOF
 chmod +x -- "$work/pdf-faults/weasyprint"
+for converter_fault in rejects-option old-help; do
+    SYSGUARD_TEST_CONVERTER_FAULT=$converter_fault PATH="$work/pdf-faults:$PATH" \
+        expect_status 7 'unsupported WeasyPrint' pdf_report daily --date "$REPORT_DATE"
+    [[ ! -e $SYSGUARD_TEST_CONVERSION_ATTEMPT ]] || fail 'unsupported converter attempted to convert a report'
+    assert_previous_report
+done
+printf '%s\n' 'PASS: incompatible converters return 7 before converting or replacing existing reports'
 SYSGUARD_TEST_CONVERTER_FAULT=failure PATH="$work/pdf-faults:$PATH" \
     expect_status 4 'WeasyPrint could not convert' pdf_report daily --date "$REPORT_DATE"
 assert_previous_report

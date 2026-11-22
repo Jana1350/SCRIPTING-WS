@@ -140,6 +140,69 @@ expect_status 0 '' rotate --as-of "$AS_OF"
 assert_no_staging
 printf '%s\n' 'PASS: missing and header-only active logs are no-ops, including a relative dry-run with CDPATH set'
 
+# Run an independent writer at two exact rotation checkpoints. The initial
+# data directory is absent. If rotation skips the lock, the writer can seed
+# an old row before the read, then append a new row before publication.
+data=$work/cases/concurrent-init/data
+active=$data/metrics.csv
+archive=$data/archive
+assert_absent "$data"
+export ROTATION_TEST_RACE_DATA=$data ROTATION_TEST_RACE_STATUS="$work/race-status"
+export ROTATION_TEST_RACE_WRITER="$work/race-writer"
+export ROTATION_TEST_RACE_FIRST=$FRIDAY_START ROTATION_TEST_RACE_SECOND=$TODAY
+cat > "$ROTATION_TEST_RACE_WRITER" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case $1 in
+    initialize) row=$ROTATION_TEST_RACE_FIRST ;;
+    append) row=$ROTATION_TEST_RACE_SECOND ;;
+esac
+mkdir -p -- "$ROTATION_TEST_RACE_DATA"
+exec {writer_fd}>> "$ROTATION_TEST_RACE_DATA/.metrics.lock"
+flock -n -E 6 "$writer_fd"
+active=$ROTATION_TEST_RACE_DATA/metrics.csv
+stage=$(mktemp -- "$ROTATION_TEST_RACE_DATA/.writer.XXXXXXXX")
+if [[ -f $active ]]; then
+    cat -- "$active" > "$stage"
+else
+    printf '%s\n' 'timestamp,cpu_percent,memory_percent,disk_percent' > "$stage"
+fi
+printf '%s\n' "$row" >> "$stage"
+mv -fT -- "$stage" "$active"
+EOF
+cat > "$work/race-checkpoints" <<'EOF'
+set -T
+rotation_checkpoint() {
+    local action status=0
+    case $BASH_COMMAND in
+        safe_archive_dir) action=initialize ;;
+        prepare_archives) action=append ;;
+        *) return 0 ;;
+    esac
+    [[ ! -e $ROTATION_TEST_RACE_STATUS.$action ]] || return 0
+    BASH_ENV='' bash "$ROTATION_TEST_RACE_WRITER" "$action" || status=$?
+    printf '%s\n' "$status" > "$ROTATION_TEST_RACE_STATUS.$action"
+}
+trap rotation_checkpoint DEBUG
+EOF
+BASH_ENV="$work/race-checkpoints" expect_status 0 '' rotate --as-of "$AS_OF"
+if [[ -f $ROTATION_TEST_RACE_STATUS.append ]] && [[ $(cat "$ROTATION_TEST_RACE_STATUS.append") == 0 ]]; then
+    grep -Fxq -- "$TODAY" "$active" || fail 'unlocked rotation discarded the concurrent append'
+fi
+[[ $(cat "$ROTATION_TEST_RACE_STATUS.initialize") == 6 ]] || fail 'rotation did not lock first-use initialization'
+assert_absent "$ROTATION_TEST_RACE_STATUS.append"
+assert_absent "$active"
+expect_status 0 '' bash "$ROTATION_TEST_RACE_WRITER" initialize
+expect_status 0 '' bash "$ROTATION_TEST_RACE_WRITER" append
+expect_status 0 '' rotate --as-of "$AS_OF"
+verify_archive 2026-11-20 "$FRIDAY_START"
+write_csv "$work/expected.csv" "$TODAY"
+cmp -s -- "$work/expected.csv" "$active" || fail 'writer retry sample was not preserved'
+before=$(fingerprint "$data")
+expect_status 0 '' rotate --as-of "$AS_OF"
+[[ $(fingerprint "$data") == "$before" ]] || fail 'repeat rotation changed recovered state'
+printf '%s\n' 'PASS: first-use rotation exits 0 under the shared lock, concurrent writer gets 6, and retry preserves its sample'
+
 generate_reports() {
     local destination=$1
     bash "$report" daily --date 2026-11-20 --config "$config" --data-dir "$data" --output-dir "$destination"

@@ -175,6 +175,13 @@ lock_path_is_safe() {
     [[ ! -L $1 && ( ! -e $1 || -f $1 ) ]]
 }
 
+copy_snapshot() {
+    if ! { cat -- "$1" > "$2" && cmp -s -- "$1" "$2"; }; then
+        diagnostic "could not verify snapshot of ${1##*/}"
+        return 4
+    fi
+}
+
 snapshot_metrics() (
     local data_dir=$1 parent lock_path lock_fd csv
     if [[ ! -d $data_dir ]]; then
@@ -201,7 +208,7 @@ snapshot_metrics() (
     csv=$data_dir/metrics.csv
     if [[ -e $csv || -L $csv ]]; then
         [[ -f $csv && ! -L $csv ]] || return 4
-        cat -- "$csv" > "$stage/metrics.csv" || return 4
+        copy_snapshot "$csv" "$stage/metrics.csv" || return 4
     fi
     snapshot_archives "$data_dir/archive"
 )
@@ -221,7 +228,7 @@ snapshot_archives() {
         [[ $name =~ ^metrics-([0-9]{4}-[0-9]{2}-[0-9]{2})\.csv\.gz$ ]] || continue
         [[ ${BASH_REMATCH[1]} < $first_day || ${BASH_REMATCH[1]} > $last_day ]] && continue
         [[ -f $archive && ! -L $archive ]] || return 4
-        cat -- "$archive" > "$stage/$name" || return 4
+        copy_snapshot "$archive" "$stage/$name" || return 4
     done
     return 0
 }
@@ -234,13 +241,14 @@ timestamp_epoch() {
 }
 
 select_samples() {
-    local header line timestamp cpu memory disk epoch previous='' skipped=0 status
+    local header line timestamp cpu memory disk epoch previous='' skipped=0 records read_records=1 status
     local percent='^(([0-9]|[1-9][0-9])\.[0-9]|100\.0)$'
     local row_pattern='^([^,]+),([^,]+),([^,]+),([^,]+)$'
 
     [[ -s $1 ]] || return 0
-    # Bash read skips NUL bytes. Reject them before reading the snapshot.
-    awk 'index($0, sprintf("%c", 0)) { exit 3 }' "$1" || {
+    # Bash read skips NULs and can stop at an I/O error as well as EOF.
+    # Count records independently before parsing to detect an incomplete read.
+    records=$(awk 'index($0, sprintf("%c", 0)) { exit 3 } END { print NR }' "$1") || {
         status=$?
         if (( status == 3 )); then
             diagnostic 'invalid CSV: NUL byte'
@@ -249,11 +257,20 @@ select_samples() {
         return 4
     }
     {
-        if ! IFS= read -r header || [[ $header != "$CSV_HEADER" ]]; then
+        if ! IFS= read -r header; then
+            if [[ -z $header ]]; then
+                diagnostic 'incomplete CSV snapshot read'
+                return 4
+            fi
+            diagnostic 'invalid CSV header: missing newline'
+            return 3
+        fi
+        if [[ $header != "$CSV_HEADER" ]]; then
             diagnostic 'invalid CSV header'
             return 3
         fi
         while IFS= read -r line; do
+            read_records=$((read_records + 1))
             if [[ $line =~ $row_pattern ]]; then
                 timestamp=${BASH_REMATCH[1]}
                 cpu=${BASH_REMATCH[2]}
@@ -274,7 +291,11 @@ select_samples() {
             diagnostic 'invalid CSV: missing final newline'
             return 3
         fi
-    } < "$1"
+    } < "$1" || return 4
+    if (( read_records != records )); then
+        diagnostic 'incomplete CSV snapshot read'
+        return 4
+    fi
     printf 'skipped\t%s\n' "$skipped" || return 4
 }
 
@@ -407,9 +428,9 @@ escape_html() {
 }
 
 render_html() {
-    local summary=$1 count skipped gaps first last heading quality coverage chart=''
-    local from until zone from_html until_html zone_html first_html last_html
-    IFS=$'\t' read -r count skipped gaps first last <<< "${summary%%$'\n'*}"
+    local summary=$1 count skipped gaps first_epoch last_epoch heading quality coverage boundary_coverage chart=''
+    local from until zone from_html until_html zone_html first last first_html last_html
+    IFS=$'\t' read -r count skipped gaps first_epoch last_epoch <<< "${summary%%$'\n'*}"
     if (( count == 0 && skipped > 0 )); then
         diagnostic "invalid CSV: skipped $skipped malformed rows and found no valid samples in the report window"
         return 3
@@ -423,15 +444,17 @@ render_html() {
     heading='Sampling summary'
     quality=''
     coverage='No valid samples in the available metrics logs for this window.'
+    boundary_coverage="Unobserved window: $((end - start)) seconds."
     if (( skipped > 0 )); then
         quality="<p><strong>Data quality warning.</strong> Skipped $skipped malformed or out-of-order rows in the input logs.</p>"
         diagnostic "skipped $skipped malformed or out-of-order rows in the input logs"
     fi
     if (( count > 0 )); then
-        first=$(date -d "@$first" '+%F %T %:z') && last=$(date -d "@$last" '+%F %T %:z') || return 4
+        first=$(date -d "@$first_epoch" '+%F %T %:z') && last=$(date -d "@$last_epoch" '+%F %T %:z') || return 4
         first_html=$(escape_html "$first")
         last_html=$(escape_html "$last")
         coverage="Observed $first_html to $last_html. Intervals between valid samples longer than the configured watch interval (${settings[WATCH_INTERVAL_SECONDS]} seconds): $gaps."
+        boundary_coverage="Leading gap: $((first_epoch - start)) s. Trailing gap: $((end - last_epoch)) s to the exclusive end. These intervals describe sample timing."
         chart="<figure><img src=\"../charts/$chart_name\" width=\"1200\" height=\"900\" alt=\"Three charts showing CPU, memory, and disk utilization over time\"><figcaption>CPU, memory, and disk utilization over time. Offsets are shown on the time axis.</figcaption></figure>"
     else
         heading='NO DATA'
@@ -464,6 +487,7 @@ render_html() {
     <h2>$heading</h2>
     <p>Valid samples: $count</p>
     <p>$coverage</p>
+    <p>$boundary_coverage</p>
     $quality
     <table>
       <caption>Utilization from valid samples in the available metrics logs</caption>
@@ -479,6 +503,16 @@ ${summary#*$'\n'}
 </body>
 </html>
 EOF
+}
+
+check_pdf_converter() {
+    local help
+    if ! help=$(weasyprint --allowed-protocols file --base-url . --help 2>&1) ||
+        ! grep -Eq '(^|[[:blank:],])--allowed-protocols([[:blank:],=]|$)' <<< "$help" ||
+        ! grep -Eq '(^|[[:blank:],])--base-url([[:blank:],=]|$)' <<< "$help"; then
+        diagnostic 'unsupported WeasyPrint: requires --allowed-protocols and --base-url'
+        return 7
+    fi
 }
 
 render_pdf() {
@@ -627,6 +661,7 @@ main() {
                 return 7
             fi
         done
+        check_pdf_converter || return "$?"
     fi
 
     report_lock=$repo_root/runtime/report.lock

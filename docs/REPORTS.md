@@ -12,7 +12,7 @@ Member C owns the daily and weekly reports, gnuplot charts, PDF generation, and 
 | Rotation verification and flushing | `gzip -t`, `cmp`, `wc`, and GNU `sync` with file and directory arguments |
 | Release checks | ShellCheck, `file`, `pdfinfo`, `pdftotext`, and `pdfimages` |
 
-PDF generation was exercised with WeasyPrint 67.0. The converter and its PDF checks run only when PDF is enabled. Gnuplot is required when there are valid samples to plot.
+PDF generation was exercised with WeasyPrint 67.0. The converter and its PDF checks run only when PDF is enabled. The reporter checks that WeasyPrint supports `--allowed-protocols` and `--base-url`. A missing or incompatible converter exits `7` before conversion. Gnuplot is required when there are valid samples to plot.
 
 ## Commands and configuration
 
@@ -63,7 +63,7 @@ timestamp,cpu_percent,memory_percent,disk_percent
 
 The producer writes four fields per newline-terminated row. Timestamps use a numeric offset such as `2026-11-20T08:00:00+05:30`. Percentages have one decimal place and range from `0.0` to `100.0`. Rows are strictly increasing by timestamp instant within each file.
 
-The monitor and rotator acquire an exclusive `flock` before opening the active CSV. The reporter takes a shared lock while copying the active and relevant archived inputs, then releases it before rendering. A held conflicting lock returns exit `6`. Keep lock files in place so the processes keep using the same inode.
+The monitor and rotator acquire an exclusive `flock` before opening the active CSV. A real rotation initializes the data directory as needed and takes the shared metrics lock before inspecting files. The reporter takes a shared lock while copying and verifying the active and relevant archived inputs, then releases it before rendering. A held conflicting lock returns exit `6`. Keep lock files in place so the processes keep using the same inode.
 
 ## Report periods and calculations
 
@@ -71,7 +71,9 @@ The monitor and rotator acquire an exclusive `flock` before opening the active C
 - Weekly defaults to the latest completed Monday–Sunday. `--date` must be the first Monday. A run on Monday, November 23, 2026 defaults to November 16 through 22.
 - Every window starts at local midnight inclusive and ends at the next period boundary exclusive. The conversion to instants accounts for offset and daylight-saving changes.
 - The reporter validates headers, row syntax, ranges, timestamps, and order. It combines relevant gzip archives and active data, collapses identical measurements at the same instant, and fails on differing measurements at the same instant across sources. Skipped malformed or out-of-order rows are disclosed in the report. Invalid headers, corrupt candidate gzip archives, and a damaged selection with no usable samples produce an error.
+- Snapshot copies must match their sources byte for byte while the metrics lock is held. The reporter also checks that parsing reads every record from each CSV. A failed copy or incomplete read returns `4` and preserves completed reports.
 - `awk` calculates count, minimum, maximum, and arithmetic mean for each metric using validated in-window samples. The mean is the sum of values divided by the sample count. The implementation accumulates integer tenths before formatting min and max to one decimal and mean to two. A valid empty window shows **NO DATA**, a count of zero, and `N/A` statistics.
+- HTML and PDF show the elapsed time from the inclusive start to the first valid sample and from the last valid sample to the exclusive end. An empty window shows its full unobserved duration. These values describe sample timing. A coverage percentage would require an agreed sampling tolerance.
 
 The reporter feeds validated epochs and numeric percentages to gnuplot to create a PNG with three panels for CPU, memory, and disk. The time axis shows UTC offsets. Plot lines break across gaps longer than the configured watch interval. HTML contains the reporting window, timezone, coverage, statistics, warnings, and a chart link. When PDF is enabled, WeasyPrint renders staged HTML using local chart assets. `file` and `pdfinfo` check the output format and readable pages. `pdfimages` checks for the actual embedded chart when samples exist.
 
