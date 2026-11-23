@@ -137,6 +137,77 @@ cmp -s "$work/expected" "$csv" || fail 'busy one-shot writer changed CSV'
 exec {held}>&-
 [[ -f $work/data/.metrics.lock ]] || fail 'lock inode removed'
 (
+    # Redirect repository discovery so the default runtime lock stays in /tmp.
+    checkout=$work/lock-checkout
+    mkdir -p "$checkout"/{config,data,runtime,custom} "$work/lock-targets"
+    cp "$root/config/defaults.conf" "$checkout/config/"
+    canonical_directory() {
+        case $1 in
+            "$root/scripts/..") printf '%s\n' "$checkout" ;;
+            /) printf '/\n' ;;
+            *) return 4 ;;
+        esac
+    }
+    printf 'unrelated\0contents\n' > "$work/lock-targets/expected"
+    cp "$work/lock-targets/expected" "$work/lock-targets/file"
+    default_lock=$checkout/runtime/metrics.lock
+    custom_lock=$checkout/custom/.metrics.lock
+    ln -s "$work/lock-targets/file" "$default_lock"
+    ln -s "$work/lock-targets/file" "$custom_lock"
+    cp "$work/expected" "$checkout/data/metrics.csv"
+    expect_status 4 --once --config "$work/config"
+    cmp "$work/expected" "$checkout/data/metrics.csv" || fail 'unsafe default lock changed CSV'
+    expect_status 4 --once --data-dir custom
+    expect_status 4 --watch --data-dir custom
+    [[ ! -e $checkout/custom/metrics.csv ]] || fail 'unsafe custom lock published a sample'
+    cmp "$work/lock-targets/expected" "$work/lock-targets/file" || fail 'lock target changed'
+    mv "$default_lock" "$checkout/runtime/old-link"
+    cp "$work/lock-targets/expected" "$default_lock"
+    exec {held}>>"$default_lock"
+    flock -n "$held"
+    expect_status 6 --once --data-dir ./data
+    exec {held}>&-
+    expect_status 0 --once
+    cmp "$work/lock-targets/expected" "$default_lock" || fail 'truncated default lock'
+
+    mv "$checkout/runtime" "$checkout/original-runtime"
+    ln -s "$work/lock-targets" "$checkout/runtime"
+    expect_status 4 --once
+    [[ ! -e $work/lock-targets/metrics.lock ]] || fail 'created lock through runtime symlink'
+    ln -s "$work/lock-targets" "$checkout/alias"
+    for dir in alias/new alias/../clean "$work/lock-targets/file/child"; do
+        expect_status 4 --once --data-dir "$dir"
+    done
+    [[ ! -e $work/lock-targets/new ]] || fail 'created data through symlink'
+
+    mkdir "$checkout/dangling"
+    ln -s "$work/lock-targets/missing" "$checkout/dangling/.metrics.lock"
+    expect_status 4 --once --data-dir dangling
+    [[ ! -e $work/lock-targets/missing && ! -e $checkout/dangling/metrics.csv ]] || fail 'followed dangling lock'
+
+    mv "$custom_lock" "$checkout/custom/old-link"
+    cp "$work/lock-targets/expected" "$custom_lock"
+    inode=$(stat -c '%d:%i' "$custom_lock")
+    expect_status 0 --once --data-dir custom
+    [[ $(stat -c '%d:%i' "$custom_lock") == "$inode" ]] || fail 'replaced regular lock'
+    cmp "$work/lock-targets/expected" "$custom_lock" || fail 'truncated regular lock'
+    cp "$checkout/custom/metrics.csv" "$work/before-replacement"
+    stamp='2026-11-21T10:00:05+00:00'
+    # The descriptor stays open on the original inode while its name changes.
+    flock() {
+        command mv -- "$custom_lock" "$checkout/custom/previous-lock" || return 4
+        cp "$work/lock-targets/expected" "$custom_lock" || return 4
+        command flock "$@"
+    }
+    expect_status 4 --once --data-dir custom
+    exec {held}>>"$custom_lock"
+    command flock -n "$held"
+    expect_status 4 --watch --data-dir custom
+    exec {held}>&-
+    cmp "$work/before-replacement" "$checkout/custom/metrics.csv" || fail 'published with mismatched lock'
+)
+printf '%s\n' 'PASS: unsafe default and custom locks, parent paths, persistent inode and descriptor mismatch'
+(
     flock() { return 70; }
     expect_status 4 --watch --config "$work/config" --data-dir "$work/data"
 )

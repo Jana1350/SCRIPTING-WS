@@ -238,11 +238,57 @@ sample_time() {
     date '+%Y-%m-%dT%H:%M:%S%:z'
 }
 
+# Check each component before resolving "..", as the rotator does.
+safe_directory() {
+    local path=$1 component directory=''
+    local -a components
+    [[ $path == /* && $path != *[[:cntrl:]]* ]] || return 4
+    IFS=/ read -r -a components <<< "${path#/}"
+    for component in "${components[@]}"; do
+        case $component in
+            ''|.) ;;
+            ..) directory=${directory%/*} ;;
+            *)
+                directory+=/$component
+                [[ ! -L $directory ]] || return 4
+                [[ ! -e $directory || ( -d $directory && -x $directory ) ]] || return 4
+                ;;
+        esac
+    done
+    [[ -n $directory ]] || return 4
+    printf '%s\n' "$directory"
+}
+
+lock_matches_path() {
+    local path=$1 descriptor=/proc/self/fd/$lock_fd
+    safe_directory "${path%/*}" >/dev/null &&
+        [[ ! -L $path && -f $descriptor && $descriptor -ef $path ]]
+}
+
 acquire_lock() {
-    local lock_path=$1 status
-    exec {lock_fd}>>"$lock_path" || return 4
-    flock -n -E 6 "$lock_fd" && return 0
-    status=$?
+    local lock_path=$1 status=0 identity
+    safe_directory "${lock_path%/*}" >/dev/null || return 4
+    [[ ! -L $lock_path ]] || return 4
+    if [[ ! -e $lock_path ]]; then
+        # noclobber creates a missing lock exclusively. Another first-use
+        # writer may win creation; validate its file through the same path.
+        (
+            cd -P -- "${lock_path%/*}" || exit 4
+            safe_directory "${lock_path%/*}" >/dev/null && [[ . -ef ${lock_path%/*} ]] || exit 4
+            set -C
+            : > "${lock_path##*/}"
+        ) 2>/dev/null || [[ -f $lock_path ]] || return 4
+    fi
+    [[ ! -L $lock_path && -f $lock_path ]] || return 4
+    identity=$(stat -c '%d:%i' -- "$lock_path") || return 4
+    # Linux local flock supports an exclusive lock on a read-only descriptor.
+    exec {lock_fd}<"$lock_path" || return 4
+    if lock_matches_path "$lock_path" &&
+        [[ $(stat -Lc '%d:%i' -- "/proc/self/fd/$lock_fd") == "$identity" ]]; then
+        flock -n -E 6 "$lock_fd" || status=$?
+        lock_matches_path "$lock_path" || status=4
+        (( status == 0 )) && return 0
+    fi
     exec {lock_fd}>&-
     (( status == 6 )) && return 6
     return 4
@@ -255,7 +301,7 @@ timestamp_epoch() {
 }
 
 append_csv() {
-    local active=$1 row=$2 epoch=$3 header line stamp previous='' timestamp last_byte
+    local active=$1 row=$2 epoch=$3 lock_path=$4 header line stamp previous='' timestamp last_byte
     local pct='([0-9]|[1-9][0-9])\.[0-9]|100\.0'
     local row_pattern="^([^,]+),($pct),($pct),($pct)$"
     temp_csv=$(mktemp -- "${active%/*}/.metrics.XXXXXXXX") || return 4
@@ -287,6 +333,7 @@ append_csv() {
         printf '%s\n' "$CSV_HEADER" > "$temp_csv" || return 4
     fi
     printf '%s\n' "$row" >> "$temp_csv" || return 4
+    lock_matches_path "$lock_path" || return 4
     mv -fT -- "$temp_csv" "$active" || return 4
     temp_csv=''
 }
@@ -311,16 +358,18 @@ collect_once() {
     epoch=$(timestamp_epoch "$timestamp") || return 3
     row=$timestamp,$cpu,$memory,$disk
 
-    mkdir -p -- "$data_dir" || return 4
-    data_dir=$(canonical_directory "$data_dir") || return "$?"
+    local data_path
+    data_path=$(safe_directory "$data_dir") || return 4
+    mkdir -p -- "$data_path" || return 4
     # Member C must use the same mapping: canonical default data uses the
     # repository runtime lock; every other canonical data directory owns its
     # persistent .metrics.lock. Open the active CSV only after acquiring it.
-    if [[ $data_dir == "$repo_root/data" || $data_dir -ef $repo_root/data ]]; then
+    if [[ $data_path == "$repo_root/data" || $data_path -ef $repo_root/data ]]; then
+        safe_directory "$repo_root/runtime" >/dev/null || return 4
         mkdir -p -- "$repo_root/runtime" || return 4
         lock_path=$repo_root/runtime/metrics.lock
     else
-        lock_path=$data_dir/.metrics.lock
+        lock_path=$data_path/.metrics.lock
     fi
     acquire_lock "$lock_path" || {
         status=$?
@@ -328,7 +377,7 @@ collect_once() {
         diagnostic 'warning: metrics lock is busy, skipping this sample'
         return 0
     }
-    append_csv "$data_dir/metrics.csv" "$row" "$epoch" || return "$?"
+    append_csv "$data_path/metrics.csv" "$row" "$epoch" "$lock_path" || return "$?"
     exec {lock_fd}>&-
     printf '%s\n' "$row"
 }
@@ -386,7 +435,7 @@ monitor_main() {
         usage >&2
         return 2
     fi
-    for tool in awk cat date df flock mkdir mktemp mv rm sleep tail; do
+    for tool in awk cat date df flock mkdir mktemp mv rm sleep stat tail; do
         if ! command -v "$tool" >/dev/null; then
             diagnostic "required command unavailable: $tool"
             return 7
