@@ -117,7 +117,7 @@ load_validate_config() {
 }
 
 canonical_directory() {
-    ( cd -P -- "$1" && pwd -P ) || return 4
+    ( CDPATH='' cd -P -- "$1" && pwd -P ) || return 4
 }
 
 read_cpu_counters() {

@@ -2,7 +2,7 @@
 
 # Sensor fixtures stay in the temporary harness. The published v1 CSV is read-only.
 set -euo pipefail
-root=$(cd -P -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)
+root=$(CDPATH='' cd -P -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)
 source "$root/scripts/monitor.sh"
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
@@ -319,6 +319,28 @@ cat > "$work/bin/df" <<'DF'
 printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fixture 1000 400 600 40% /'
 DF
 chmod +x "$work/bin/"{sleep,cat,df}
+for invocation in relative absolute; do
+    (
+        if [[ $invocation == relative ]]; then
+            cd -- "$root"
+            scripts=scripts
+        else
+            cd -- "$work"
+            scripts=$root/scripts
+        fi
+        export CDPATH=. PATH="$work/bin:$PATH" SLEEP_LOG="$work/$invocation.waits"
+        data=$work/$invocation
+        args=(--config config/defaults.conf --data-dir "$data")
+        "$scripts/monitor.sh" --once "${args[@]}" > "$work/stdout" 2> "$work/stderr" || fail "$invocation monitor invocation"
+        row=$(cat "$work/stdout")
+        [[ $row == *,20.0,60.0,40.0 ]] || fail "$invocation monitor output"
+        printf '%s\n' "$expected_header" "$row" | cmp - "$data/metrics.csv" || fail "$invocation CSV"
+        "$scripts/main.sh" --status "${args[@]}" > "$work/stdout" 2> "$work/stderr" || fail "$invocation main invocation"
+        [[ $(cat "$work/stdout") == "Metrics file present: $data/metrics.csv" ]] || fail "$invocation status path"
+    )
+done
+printf '%s\n' 'PASS: relative and absolute monitor and main invocation with CDPATH=.'
+
 python3 - "$root" "$work" <<'PY'
 import os
 from pathlib import Path

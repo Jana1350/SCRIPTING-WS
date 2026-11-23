@@ -48,7 +48,7 @@ main() {
     if [[ $# == 1 && $1 == --help ]]; then main_usage; return 0; fi
     local script_dir=${BASH_SOURCE[0]%/*} repo_root
     [[ $script_dir != "${BASH_SOURCE[0]}" ]] || script_dir=.
-    repo_root=$(cd -P -- "$script_dir/.." && pwd -P) || return 4
+    repo_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd -P) || return 4
     local mode='' period='' config='' data='' path
     local -a options=()
     while (( $# )); do
