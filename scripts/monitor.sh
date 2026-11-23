@@ -299,7 +299,7 @@ cleanup_traps() {
 }
 
 collect_once() {
-    local before after cpu memory disk timestamp epoch row lock_path
+    local before after cpu memory disk timestamp epoch row lock_path status
     before=$(read_cpu_counters) || return "$?"
     sleep_sample "${settings[CPU_SAMPLE_SECONDS]}" || return 3
     (( stopping == 0 )) || return 0
@@ -322,7 +322,12 @@ collect_once() {
     else
         lock_path=$data_dir/.metrics.lock
     fi
-    acquire_lock "$lock_path" || return "$?"
+    acquire_lock "$lock_path" || {
+        status=$?
+        [[ $mode == --watch && $status == 6 ]] || return "$status"
+        diagnostic 'warning: metrics lock is busy, skipping this sample'
+        return 0
+    }
     append_csv "$data_dir/metrics.csv" "$row" "$epoch" || return "$?"
     exec {lock_fd}>&-
     printf '%s\n' "$row"

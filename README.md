@@ -17,14 +17,16 @@ The monitor prints one CSV row to stdout after successful publication. Config me
 | Command | Behavior |
 |---|---|
 | `scripts/monitor.sh --help` | Show monitor syntax. |
-| `scripts/monitor.sh --once` | Collect and publish one complete sample. |
-| `scripts/monitor.sh --watch` | Start sampling immediately. The start-to-start interval includes the CPU sampling delay. Missed starts are skipped. Ctrl-C or SIGTERM stops the foreground watch gracefully. A failed cycle, including lock contention, ends the watch with its failure code. |
+| `scripts/monitor.sh --once` | Collect and publish one complete sample. A busy metrics lock ends the command with exit code 6. |
+| `scripts/monitor.sh --watch` | Start sampling immediately. The start-to-start interval includes the CPU sampling delay. Ctrl-C or SIGTERM stops the foreground watch gracefully. |
 | `scripts/main.sh --help` | Show orchestration syntax. |
 | `scripts/main.sh --status` | Validate config and report whether the metrics file is present. A missing file before the first sample is a successful status check. Presence alone gives no assurance about freshness or contents. |
 | `scripts/main.sh --once` | Check that both child executables exist. Run the monitor, then invoke `alerts.sh --once` only after successful collection. An alert failure leaves the collected row in place. |
 | `scripts/main.sh --report daily` or `scripts/main.sh --report weekly` | Delegate the selected period to `report.sh` and propagate its exit status. |
 
 All operational modes accept optional `--config FILE` and `--data-dir DIR`. Use `--help` alone.
+
+If the metrics lock is busy at publication, watch prints `warning: metrics lock is busy, skipping this sample` to stderr and discards that sample. It starts a fresh measurement at the next scheduled interval. Missed starts are skipped, so prolonged contention leaves gaps in the CSV. Other errors end watch with their usual exit codes, including exit 4 for a lock-operation failure.
 
 ## Read a measurement
 
@@ -60,7 +62,7 @@ The writer takes an exclusive lock before opening the active CSV. It validates t
 | 3 | Invalid measurement, CSV, or timestamp. The test runner also uses 3 for an incompatible v1 fixture. |
 | 4 | Filesystem, publication, or lock-operation failure |
 | 5 | Mail delivery failure propagated from the alerts child |
-| 6 | Metrics lock already held |
+| 6 | Metrics lock already held during one-shot collection |
 | 7 | Required command or child executable unavailable |
 
 ## Run and interpret tests
@@ -72,4 +74,4 @@ tests/run_all.sh
 
 Run the first command for Member A's suite. It uses temporary directories, deterministic sensor inputs, and test-only child executables. The signal checks use Python 3. The second command checks the shared fixture against contract C9 before running available suites. A changed fixture exits before any suite starts. A `SKIP` line identifies an unavailable suite.
 
-The current checkout passes Member A's suite and skips the four suites for alerts, cron, reports, and rotation. Delegation tests verify arguments and exit propagation with temporary stand-ins. The lock test exercises a simulated rotation. Real email delivery, cron execution, HTML/PDF generation, actual log rotation, and timestamp continuity across archives remain unverified. Until the corresponding child executables are available, `main.sh --once` and both report modes return 7.
+Member A's tests use a real advisory lock and a controlled clock to check that watch skips contended samples and publishes a fresh row on schedule after release. They also exercise simulated rotation. Delegation tests verify arguments and exit propagation with temporary stand-ins. Use the full runner's output for the suite results in your checkout.

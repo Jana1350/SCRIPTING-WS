@@ -127,14 +127,19 @@ run 3
 df_fixture=$'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture disk 1000 400 600 40% /'
 disk_status=1
 run 3
+expect_status 3 --watch --config "$work/config" --data-dir "$work/data"
 disk_status=0
 
 exec {held}>>"$work/data/.metrics.lock"
 flock -n "$held"
 run 6
-expect_status 6 --watch --config "$work/config" --data-dir "$work/data"
+cmp -s "$work/expected" "$csv" || fail 'busy one-shot writer changed CSV'
 exec {held}>&-
 [[ -f $work/data/.metrics.lock ]] || fail 'lock inode removed'
+(
+    flock() { return 70; }
+    expect_status 4 --watch --config "$work/config" --data-dir "$work/data"
+)
 stage_status=1
 run 4
 stage_status=0
@@ -215,27 +220,45 @@ done
 printf 'PASS: monitor fixtures (locale %s, permission check %s)\n' "${test_locale:-C.UTF-8}" \
     "$([[ $EUID == 0 ]] && printf skipped-root || printf exercised)"
 
-# Drive watch's monotonic clock directly. The first sample takes 1.25 s;
-# the second takes 5.25 s, overrunning two starts on a 2 s cadence.
+# Hold the writer lock for two samples. Advance the monotonic clock in the
+# sleep fixture so the second sample overruns two starts on a 2 s cadence.
 (
-    stopping=0
-    ticks=0
-    now=100
-    cycles=0
-    declare -A settings=([WATCH_INTERVAL_SECONDS]=2)
+    data=$work/watch
+    mkdir "$data"
+    printf 'WATCH_INTERVAL_SECONDS=2\n' > "$work/watch.conf"
+    exec {held}>>"$data/.metrics.lock"
+    flock -n "$held"
+    now=0
+    samples=0
     uptime_ticks() { ticks=$now; }
-    collect_once() {
-        cycles=$((cycles + 1))
-        if (( cycles == 1 )); then now=$((now + 125)); else now=$((now + 525)); fi
-    }
     sleep_sample() {
-        [[ $1 == 0.75 ]] || fail "unexpected cadence delay $1"
+        if [[ $1 == 1 ]]; then
+            samples=$((samples + 1))
+            case $samples:$now in
+                1:0|3:800) now=$((now + 125)) ;;
+                2:200) now=$((now + 525)) ;;
+                *) fail "unexpected CPU sample $samples at tick $now" ;;
+            esac
+            stamp="2026-11-21T10:00:0${samples}+00:00"
+            printf '%s\n' "$cpu_after" > "$work/cpu"
+            return
+        fi
+        [[ $1 == 0.75 ]] || fail "unexpected watch delay $1"
+        if (( samples <= 2 )); then
+            [[ ! -e $data/metrics.csv ]] || fail 'watch wrote a contended sample'
+        fi
+        if (( samples == 2 )); then flock -u "$held" || fail 'unlock failed'; fi
+        if (( samples == 3 )); then stopping=1; fi
         now=$((now + 75))
-        if (( cycles == 2 )); then stopping=1; fi
+        printf '%s\n' "$cpu_before" > "$work/cpu"
     }
-    watch_loop
-    [[ $cycles == 2 ]]
+    expect_status 0 --watch --config "$work/watch.conf" --data-dir "$data"
+    [[ $(grep -c 'warning: metrics lock is busy, skipping this sample' "$work/stderr") == 2 ]] || fail 'watch contention warnings'
+    row='2026-11-21T10:00:03+00:00,20.0,60.0,40.0'
+    printf '%s\n' "$row" | cmp - "$work/stdout" || fail 'unexpected watch output'
+    printf '%s\n' "$expected_header" "$row" | cmp - "$data/metrics.csv" || fail 'watch CSV after release'
 )
+printf '%s\n' 'PASS: watch skipped two busy samples and resumed on schedule after release'
 expect_status 2 --watch --once
 
 # Exercise orchestration against executables in a temporary checkout.
