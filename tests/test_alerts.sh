@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Both suites copy the real entry points into an isolated temporary checkout.
+sandbox() {
+    local source
+    source=$(cd "$(dirname -- "${BASH_SOURCE[0]}")/../scripts" && pwd -P)
+    temp=$(mktemp -d)
+    trap 'rm -rf -- "$temp"' EXIT
+    repo="$temp/SysGuard user's checkout"
+    git init -q "$repo"
+    mkdir -p "$repo/scripts" "$repo/config" "$temp/bin" "$temp/data"
+    cp "$source/alerts.sh" "$source/setup_cron.sh" "$repo/scripts/"
+    cat > "$repo/config/defaults.conf" <<'CONF'
+CPU_WARNING=75
+CPU_CRITICAL=90
+MEMORY_WARNING=75
+MEMORY_CRITICAL=90
+DISK_WARNING=80
+DISK_CRITICAL=95
+ALERT_HYSTERESIS_PERCENT=2
+CPU_SAMPLE_SECONDS=1
+WATCH_INTERVAL_SECONDS=60
+MAX_DATA_AGE_SECONDS=180
+LOG_RETENTION_DAYS=30
+MAIL_ENABLED=0
+EMAIL_TO=ops@example.test
+DISK_MOUNT=/
+REPORT_PDF_ENABLED=0
+CONF
+    export PATH="$temp/bin:$PATH"
+}
+expect() {
+    local expected=$1 rc=0
+    shift
+    "$@" > "$temp/stdout" 2>"$temp/stderr" || rc=$?
+    if [[ $rc != "$expected" ]]; then
+        cat "$temp/stderr" >&2
+        printf 'expected %s, got %s for %s\n' "$expected" "$rc" "$*" >&2; exit 1
+    fi
+}
+test_alerts() {
+    sandbox
+    # Freeze only the current time; parse actual timestamps using GNU date.
+    cat > "$temp/bin/date" <<'CLOCK'
+#!/usr/bin/env bash
+if [[ $# == 1 && $1 == +%s ]]; then echo 1800000000; else exec /usr/bin/date "$@"; fi
+CLOCK
+    chmod +x "$temp/bin/date"
+    local csv=$temp/data/metrics.csv out=$temp/data/alerts
+    local header=timestamp,cpu_percent,memory_percent,disk_percent
+    local -a alert=("$repo/scripts/alerts.sh" --once --data-dir "$temp/data")
+    sample() {
+        local ts
+        ts=$(/usr/bin/date -u -d "@$1" '+%Y-%m-%dT%H:%M:%S%:z')
+        printf '%s\n%s,%s,%s,%s\n' "$header" "$ts" "$2" "${3:-50.0}" "${4:-40.0}" > "$csv"
+    }
+    expect 3 "${alert[@]}"
+    printf '%s\n' "$header" > "$csv"; expect 3 "${alert[@]}"
+    sample 1799999820 74.9; expect 0 "${alert[@]}"
+    [[ ! -e $out/events.csv ]]
+    local n=1799999821 v
+    for v in 75.0 90.0 90.0 89.0 88.0 87.9 73.0 72.9; do
+        sample "$n" "$v"; expect 0 "${alert[@]}"; expect 0 "${alert[@]}"; ((n+=1))
+    done
+    diff -u <(printf '%s\n' WARNING CRITICAL WARNING NORMAL) <(tail -n +2 "$out/events.csv" | cut -d, -f4)
+    [[ $(grep -c ',captured,mock$' "$out/delivery.csv") == 4 ]]
+    grep -Fq 'To: ops@example.test' "$out/mock-mail.log"
+    grep -Fq 'cpu 87.9% threshold 88% CRITICAL -> WARNING' "$out/mock-mail.log"
+    sample "$n" 10.0 90.0 95.0; expect 0 "${alert[@]}"
+    [[ $(grep -c ',NORMAL,CRITICAL,' "$out/events.csv") == 2 ]]
+    local baseline
+    baseline=$(sha256sum "$out/"{state.tsv,events.csv,delivery.csv})
+    sample 1799999819 95.0; expect 3 "${alert[@]}"
+    sample 1800000001 95.0; expect 3 "${alert[@]}"
+    sample 1799999820 95.0; expect 3 "${alert[@]}"
+    sample "$n" 10.1; expect 3 "${alert[@]}"
+    for v in '100.1' '-0.1' '90' '2e1' '75.00' '3.0,4.0'; do
+        sample 1800000000 "$v"; expect 3 "${alert[@]}"
+    done
+    for v in '2027-02-30T00:00:00+00:00' '2027-01-15T08:00:00Z' '2027-01-15T08:00:00+25:00'; do
+        printf '%s\n%s,90.0,50.0,40.0\n' "$header" "$v" > "$csv"; expect 3 "${alert[@]}"
+    done
+    sample 1800000000 90.0; printf 'bad latest\n' >> "$csv"; expect 3 "${alert[@]}"
+    sample 1800000000 90.0; truncate -s -1 "$csv"; expect 3 "${alert[@]}"
+    sample 1800000000 90.0; sed -i '1s/cpu/CPU/' "$csv"; expect 3 "${alert[@]}"
+    [[ $(sha256sum "$out/"{state.tsv,events.csv,delivery.csv}) == "$baseline" ]]
+    sample 1800000000 90.0 90.0 95.0
+    exec 7>"$repo/runtime/alerts.lock"; flock -n 7; expect 6 "${alert[@]}"; exec 7>&-
+    printf 'EMAIL_TO=-oops@example.test\n' > "$repo/config/local.conf"; expect 2 "${alert[@]}"
+    : > "$repo/config/local.conf"
+    mv "$out/mock-mail.log" "$temp/capture"
+    ln -s /dev/full "$out/mock-mail.log"
+    expect 5 "${alert[@]}"
+    grep -q ',failed,mock_capture_error$' "$out/delivery.csv"
+    grep -q ',cpu,NORMAL,CRITICAL,90.0,90,' "$out/events.csv"
+    baseline=$(sha256sum "$out/"{state.tsv,events.csv,delivery.csv})
+    expect 0 "${alert[@]}"
+    [[ $(sha256sum "$out/"{state.tsv,events.csv,delivery.csv}) == "$baseline" ]]
+    printf 'corrupt\n' > "$out/state.tsv"; expect 4 "${alert[@]}"
+    # Interrupt publication after events.csv is installed, before state.tsv is replaced.
+    local isolated=$temp/recovery
+    mkdir "$isolated"
+    csv=$isolated/metrics.csv
+    sample 1800000000 75.0
+    cat > "$temp/bin/mv" <<'FAILMOVE'
+#!/usr/bin/env bash
+if [[ ${*: -1} == */alerts/state.tsv ]]; then exit 1; fi
+exec /bin/mv "$@"
+FAILMOVE
+    chmod +x "$temp/bin/mv"
+    local -a recovery=("$repo/scripts/alerts.sh" --once --data-dir "$isolated")
+    expect 4 "${recovery[@]}"
+    [[ -f $isolated/alerts/pending/state.tsv ]]
+    /bin/mv "$temp/bin/mv" "$temp/mv-fixture"
+    expect 0 "${recovery[@]}"
+    [[ $(wc -l < "$isolated/alerts/events.csv") == 2 && ! -e $isolated/alerts/pending ]]
+    grep -q $'cpu\t.*\tWARNING\t75.0' "$isolated/alerts/state.tsv"
+    expect 4 "$repo/scripts/alerts.sh" --once --data-dir "$csv"
+    echo 'PASS alert transitions, persistence, validation, locks and mock delivery'
+}
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then test_alerts; fi
