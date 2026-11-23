@@ -38,14 +38,87 @@ expect() {
         printf 'expected %s, got %s for %s\n' "$expected" "$rc" "$*" >&2; exit 1
     fi
 }
-test_alerts() {
-    sandbox
+freeze_clock() {
     # Freeze only the current time; parse actual timestamps using GNU date.
     cat > "$temp/bin/date" <<'CLOCK'
 #!/usr/bin/env bash
 if [[ $# == 1 && $1 == +%s ]]; then echo 1800000000; else exec /usr/bin/date "$@"; fi
 CLOCK
     chmod +x "$temp/bin/date"
+}
+test_locks() (
+    sandbox
+    freeze_clock
+    local data lock path inode before label
+    local -a cmd
+    local alerts=$repo/scripts/alerts.sh alert_lock=$repo/runtime/alerts.lock
+    printf 'preserve these lock bytes\0\n' > "$temp/bytes"
+    for label in default explicit-default custom; do
+        cmd=("$alerts" --once --mail-mode mock)
+        case $label in
+            default) data=$repo/data; lock=$repo/runtime/metrics.lock;;
+            explicit-default) cmd+=(--data-dir ./data/.);;
+            custom) data=$temp/custom; lock=$data/.metrics.lock; cmd+=(--data-dir "$data");;
+        esac
+        mkdir -p -- "$data"
+        local records=("$data/alerts/"{state.tsv,events.csv,delivery.csv,mock-mail.log})
+        local header=timestamp,cpu_percent,memory_percent,disk_percent stamp
+        stamp=$(date -u -d '@1799999940' '+%Y-%m-%dT%H:%M:%S%:z')
+        if [[ $label == explicit-default ]]; then
+            mv "$data/alerts" "$temp/previous"
+        else
+            [[ ! -e $lock ]]
+        fi
+        printf '%s\n%s,75.0,50.0,40.0\n' "$header" "$stamp" > "$data/metrics.csv"
+        expect 0 "${cmd[@]}"
+        [[ -f $lock && -f $alert_lock ]]
+        before=$(sha256sum "${records[@]}")
+        stamp=$(date -u -d '@1800000000' '+%Y-%m-%dT%H:%M:%S%:z')
+        printf '%s\n%s,90.0,50.0,40.0\n' "$header" "$stamp" > "$data/metrics.csv"
+        for path in "$alert_lock" "$lock"; do
+            cp "$temp/bytes" "$path"
+            inode=$(stat -c '%d:%i' "$path")
+            exec 7>>"$path"; flock -xn 7
+            expect 6 "${cmd[@]}"
+            exec 7>&-
+            [[ $(stat -c '%d:%i' "$path") == "$inode" ]]
+            cmp "$temp/bytes" "$path"
+            mv "$path" "$path.saved"
+            ln -s "$temp/bytes" "$path"
+            expect 4 "${cmd[@]}"
+            unlink "$path"
+            ln "$temp/bytes" "$path"
+            expect 4 "${cmd[@]}"
+            unlink "$path"
+            mkfifo "$path"
+            expect 4 "${cmd[@]}"
+            unlink "$path"
+            mv "$path.saved" "$path"
+            cmp "$temp/bytes" "$path"
+            [[ $(sha256sum "${records[@]}") == "$before" ]]
+        done
+        expect 0 "${cmd[@]}"
+        grep -q ',cpu,WARNING,CRITICAL,90.0,' "$data/alerts/events.csv"
+        cmp "$temp/bytes" "$alert_lock"
+        cmp "$temp/bytes" "$lock"
+    done
+    before=$(sha256sum "${records[@]}")
+    mkdir "$temp/outside"
+    cp "$temp/bytes" "$temp/outside/alerts.lock"
+    mv "$repo/runtime" "$repo/runtime.saved"
+    ln -s "$temp/outside" "$repo/runtime"
+    expect 4 "${cmd[@]}"
+    unlink "$repo/runtime"
+    mv "$repo/runtime.saved" "$repo/runtime"
+    ln -s "$temp/outside" "$temp/link"
+    expect 4 "$alerts" --once --data-dir "$temp/link/nested"
+    [[ ! -e $temp/outside/nested && $(sha256sum "${records[@]}") == "$before" ]]
+    cmp "$temp/bytes" "$temp/outside/alerts.lock"
+    echo 'PASS default, explicit-default and custom locks, contention and unsafe paths'
+)
+test_alerts() {
+    sandbox
+    freeze_clock
     local csv=$temp/data/metrics.csv out=$temp/data/alerts
     local header=timestamp,cpu_percent,memory_percent,disk_percent
     local -a alert=("$repo/scripts/alerts.sh" --once --data-dir "$temp/data")
@@ -118,4 +191,4 @@ FAILMOVE
     expect 4 "$repo/scripts/alerts.sh" --once --data-dir "$csv"
     echo 'PASS alert transitions, persistence, validation, locks and mock delivery'
 }
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then test_alerts; fi
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then (test_alerts); test_locks; fi

@@ -1,4 +1,30 @@
 #!/usr/bin/env bash
+# Generated crontab entries source only this runner in a fresh Bash process.
+run_scheduled() (
+    umask 077
+    local runtime=$1 name=$2 lock=$3 status log=$1/cron.log
+    shift 3
+    # Serialize the size check and rename across both job groups.
+    exec 7<"$runtime" || exit 4
+    flock -w 2 7 || { echo "$name skipped: cron log lock busy" >> "$log"; exit 6; }
+    if [[ -f $log && $(wc -c < "$log") -ge 1048576 ]]; then
+        mv -f -- "$log" "$log.1" || { echo "$name failed: log rotation" >> "$log"; exit 4; }
+    fi
+    exec 7<&-
+    exec 8>>"$runtime/$lock" || { echo "$name failed: cannot open $lock" >> "$log"; exit 4; }
+    flock -n -E 6 8 || {
+        status=$?
+        if (( status == 6 )); then echo "$name skipped: $lock busy" >> "$log"
+        else echo "$name failed: flock exit $status" >> "$log"; fi
+        exit "$status"
+    }
+    "$@" >> "$log" 2>&1 && exit 0
+    status=$?
+    if (( status == 6 )); then echo "$name skipped: command reported lock contention (exit 6)" >> "$log"
+    else echo "$name failed: command exit $status" >> "$log"; fi
+    exit "$status"
+)
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then return 0; fi
 set -Eeuo pipefail
 export LC_ALL=C
 umask 077
@@ -25,25 +51,23 @@ quote() {
     printf "'%s'" "${1//\'/\'\\\'\'}"
 }
 job() {
-    local schedule=$1 script=$2 lock_mode=$3 cmd path
-    shift 3
-    path=$(quote "$root/scripts/$script")
-    cmd="$path"
-    for arg in "$@"; do cmd+=" $(quote "$arg")"; done
-    if [[ -n $config ]]; then cmd+=" --config $(quote "$config")"; fi
-    local log lock wrapper
-    log=$(quote "$root/runtime/cron.log")
-    lock=$(quote "$root/runtime/cron.lock")
-    wrapper="umask 077; log=$log; if [[ -f \$log && \$(wc -c < \"\$log\") -ge 1048576 ]]; then mv -f -- \"\$log\" \"\$log.1\" || exit 4; fi; exec $cmd >>\"\$log\" 2>&1"
-    printf '%s /usr/bin/env SHELL=/bin/bash PATH=/usr/bin:/bin /usr/bin/flock %s %s /bin/bash -c %s\n' \
-        "$schedule" "$lock_mode" "$lock" "$(quote "$wrapper")"
+    local schedule=$1 name=$2 lock=$3 script=$4 arg
+    shift 4
+    local -a args=("$root/scripts/setup_cron.sh" "$root/runtime" "$name" "$lock" "$root/scripts/$script" "$@")
+    if [[ -n $config ]]; then args+=(--config "$config"); fi
+    # The scheduled Bash process expands its own positional parameters.
+    # shellcheck disable=SC2016
+    printf '%s /usr/bin/env SHELL=/bin/bash PATH=/usr/bin:/bin /bin/bash -c %s sysguard' \
+        "$schedule" "$(quote 'source "$1" || exit 4; shift; run_scheduled "$@"')"
+    for arg in "${args[@]}"; do printf ' %s' "$(quote "$arg")"; done
+    printf '\n'
 }
 render() {
     printf '%s\n' "$begin"
-    job '* * * * *' main.sh -n --once
-    job '10 0 * * *' report.sh -x daily
-    job '20 0 * * 1' report.sh -x weekly
-    job '30 0 * * *' rotate_logs.sh -x
+    job '* * * * *' monitor cron-monitor.lock main.sh --once
+    job '10 0 * * *' daily-report cron-maintenance.lock report.sh daily
+    job '20 0 * * 1' weekly-report cron-maintenance.lock report.sh weekly
+    job '30 0 * * *' rotation cron-maintenance.lock rotate_logs.sh
     printf '%s\n' "$end"
 }
 if [[ $action != --uninstall ]]; then

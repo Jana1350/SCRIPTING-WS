@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/test_alerts.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/test_alerts.sh"
 sandbox
 export FAKE_TABLE="$temp/table"
@@ -36,6 +37,53 @@ for n in 2 3 4 5; do
     /bin/sh -c "$command_line"
 done
 diff -u <(printf '%s\n' --once daily weekly '') "$repo/runtime/cron.log"
+run_job() {
+    local command_line
+    command_line=$(sed -n "${1}p" "$temp/preview" | cut -d' ' -f6-)
+    /bin/sh -c "$command_line"
+}
+# Standalone runs use a fixture collector. Integrated runs can supply A's scripts.
+if [[ -n ${SYSGUARD_TEST_MONITOR_SCRIPTS:-} ]]; then
+    cp -- "$SYSGUARD_TEST_MONITOR_SCRIPTS/"{monitor.sh,main.sh} "$repo/scripts/"
+else
+    cat > "$repo/scripts/main.sh" <<'COLLECT'
+#!/usr/bin/env bash
+set -eu
+root=$(cd "$(dirname "$0")/.." && pwd -P)
+exec 9>>"$root/runtime/metrics.lock"
+flock -xn -E 6 9
+mkdir -p "$root/data"
+if [[ ! -e $root/data/metrics.csv ]]; then
+    echo 'timestamp,cpu_percent,memory_percent,disk_percent' > "$root/data/metrics.csv"
+fi
+echo "$(date '+%Y-%m-%dT%H:%M:%S%:z'),75.0,50.0,40.0" >> "$root/data/metrics.csv"
+exec 9>&-
+exec "$root/scripts/alerts.sh" --once --mail-mode mock
+COLLECT
+fi
+log=$repo/runtime/cron.log
+exec 7>>"$repo/runtime/cron-maintenance.lock"; flock -xn 7
+expect 0 run_job 2
+[[ $(wc -l < "$repo/data/metrics.csv") == 2 && -s $repo/data/alerts/state.tsv ]]
+expect 6 run_job 3
+expect 6 run_job 4
+expect 6 run_job 5
+for name in daily-report weekly-report rotation; do grep -Fq "$name skipped: cron-maintenance.lock busy" "$log"; done
+exec 7>&-
+sample_before=$(sha256sum "$repo/data/metrics.csv" "$repo/data/alerts/state.tsv")
+exec 7>>"$repo/runtime/cron-monitor.lock"; flock -xn 7
+expect 6 run_job 2
+grep -Fq 'monitor skipped: cron-monitor.lock busy' "$log"
+exec 7>&-
+exec 7>>"$repo/runtime/metrics.lock"; flock -xn 7
+expect 6 run_job 2
+grep -Fq 'monitor skipped: command reported lock contention (exit 6)' "$log"
+expect 6 "$repo/scripts/alerts.sh" --once --mail-mode mock
+exec 7>&-
+[[ $(sha256sum "$repo/data/metrics.csv" "$repo/data/alerts/state.tsv") == "$sample_before" ]]
+printf '#!/usr/bin/env bash\nexit 23\n' > "$repo/scripts/report.sh"
+expect 23 run_job 3
+grep -Fq 'daily-report failed: command exit 23' "$log"
 before='# existing comment'
 after='0 4 * * * /bin/true'
 { echo "$before"; cat "$temp/preview"; echo "$after"; } > "$FAKE_TABLE"

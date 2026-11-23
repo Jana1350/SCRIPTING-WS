@@ -172,6 +172,35 @@ deliver() {
     fi
     printf '%s,%s,%s,%s,%s\n' "$stamp" "$id" "$recipient" "$status" "$detail" >> "$ledger"
 }
+# Walk components before normalizing ".." so a link cannot hide in the prefix.
+safe_directory() {
+    local path=$1 dir='' part
+    local -a parts
+    [[ $path != *[[:cntrl:]]* ]] || die 4 "unsafe directory"
+    IFS=/ read -r -a parts <<< "$path"
+    for part in "${parts[@]}"; do
+        case $part in
+            ''|.) continue;;
+            ..) dir=${dir%/*}; continue;;
+        esac
+        dir+=/$part
+        [[ ! -L $dir && ( ! -e $dir || -d $dir ) ]] || die 4 "unsafe directory: $dir"
+    done
+    printf '%s\n' "${dir:-/}"
+}
+acquire_lock() {
+    local path=$1 kind=$2 status
+    [[ ! -L $path && ( ! -e $path || -f $path ) ]] || die 4 "unsafe lock: $path"
+    # Bash allocates held_fd in the caller. Append opens preserve existing bytes.
+    exec {held_fd}>>"$path" || die 4 "cannot open lock: $path"
+    [[ ! -L $path && -f /proc/self/fd/$held_fd && $path -ef /proc/self/fd/$held_fd ]] ||
+        die 4 "lock changed while opening: $path"
+    [[ $(stat -Lc '%h' "/proc/self/fd/$held_fd") == 1 ]] || die 4 "aliased lock: $path"
+    flock "$kind" -n -E 6 "$held_fd" && return 0
+    status=$?
+    (( status != 6 )) || die 6 "lock busy: $path"
+    die 4 "flock failed: $path"
+}
 alerts_main() {
     set -Eeuo pipefail
     trap 'die 4 "filesystem or command failure at line $LINENO"' ERR
@@ -196,21 +225,27 @@ alerts_main() {
     load_config "$config"
     [[ $mode != real || ${cfg[MAIL_ENABLED]} == 1 ]] || die 2 "real mail disabled"
     command -v flock >/dev/null || die 7 "flock missing"
-    data=$(absolute "${data:-data}")
-    local runtime=$root/runtime out=$data/alerts
+    data=$(safe_directory "$(absolute "${data:-data}")")
+    local runtime out held_fd metrics_lock
+    runtime=$(safe_directory "$root/runtime")
+    out=$(safe_directory "$data/alerts")
     mkdir -p -- "$runtime"
-    exec 8>"$runtime/alerts.lock"
-    flock -n 8 || die 6 "alerts lock busy"
+    acquire_lock "$runtime/alerts.lock" -x
+    # Leave the alert descriptor open through recovery, publication and delivery.
+    mkdir -p -- "$data"
+    metrics_lock=$data/.metrics.lock
+    if [[ $data == "$root/data" || $data -ef $root/data ]]; then
+        metrics_lock=$runtime/metrics.lock
+    fi
+    acquire_lock "$metrics_lock" -s
     mkdir -p -- "$out"
     tmp=$(mktemp -d "$out/.alerts.XXXXXXXX")
     trap 'rm -rf -- "$tmp"' EXIT
     if [[ -d $out/pending ]]; then publish; fi
-    exec 9>"$runtime/metrics.lock"
-    flock -sn 9 || die 6 "metrics lock busy"
     local stamp epoch level threshold reason i metric old result=0
     local -a metrics=(cpu memory disk) previous=() saved=() values=() numbers=() changed=() levels=() thresholds=()
     read_sample
-    exec 9>&-
+    exec {held_fd}>&-
     read_state
     mkdir "$tmp/transaction"
     local stage=$tmp/transaction
