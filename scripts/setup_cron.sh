@@ -33,17 +33,29 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/alerts.sh"
 trap 'die 4 "cron setup failed at line $LINENO"' ERR
 repo_root
 action='' config=''
+monitor_options=(--once)
+mail_mode=''
 declare -A cfg=()
 while (($#)); do
     case $1 in
-        --help) echo 'setup_cron.sh [--print|--install|--uninstall] [--config FILE]'; exit 0;;
+        --help)
+            printf '%s\n' 'setup_cron.sh [--print|--install] [--config FILE] [--mail-mode real]' \
+                'setup_cron.sh --uninstall'
+            exit 0
+            ;;
         --print|--install|--uninstall) [[ -z $action ]] || die 2 "choose one action"; action=$1;;
         --config) [[ -n ${2-} && $2 != --* ]] || die 2 "missing config"; config=$(absolute "$2"); shift;;
+        --mail-mode)
+            [[ ${2-} == real && -z $mail_mode ]] || die 2 "expected a single --mail-mode real"
+            mail_mode=real
+            shift
+            ;;
         *) die 2 "unexpected argument";;
     esac
     shift
 done
 action=${action:---print}
+[[ $action != --uninstall || -z $mail_mode ]] || die 2 "--mail-mode real requires --print or --install"
 begin='# BEGIN SysGuard System Health Monitor v1'
 end='# END SysGuard System Health Monitor v1'
 quote() {
@@ -64,7 +76,7 @@ job() {
 }
 render() {
     printf '%s\n' "$begin"
-    job '* * * * *' monitor cron-monitor.lock main.sh --once
+    job '* * * * *' monitor cron-monitor.lock main.sh "${monitor_options[@]}"
     job '10 0 * * *' daily-report cron-maintenance.lock report.sh daily
     job '20 0 * * 1' weekly-report cron-maintenance.lock report.sh weekly
     job '30 0 * * *' rotation cron-maintenance.lock rotate_logs.sh
@@ -72,7 +84,13 @@ render() {
 }
 if [[ $action != --uninstall ]]; then
     [[ $root$config != *%* && ! $root$config =~ [[:cntrl:]] ]] || die 2 "path unsafe for cron"
-    if [[ $action == --install || -n $config || -e $root/config/defaults.conf ]]; then load_config "$config"; fi
+    if [[ $action == --install || -n $mail_mode || -n $config || -e $root/config/defaults.conf ]]; then
+        load_config "$config"
+    fi
+    if [[ $mail_mode == real ]]; then
+        [[ ${cfg[MAIL_ENABLED]} == 1 ]] || die 2 "real mail requires MAIL_ENABLED=1"
+        monitor_options+=(--mail-mode real)
+    fi
 fi
 if [[ $action == --print ]]; then render; exit 0; fi
 command -v crontab >/dev/null || die 7 "crontab missing"

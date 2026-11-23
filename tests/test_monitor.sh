@@ -352,6 +352,12 @@ main_exit 0 --status --data-dir 'data set'
 main_exit 2 --status --config missing
 main_exit 2 --report monthly
 main_exit 7 --report daily
+main_exit 2 --mail-mode real
+main_exit 2 --status --mail-mode real
+main_exit 2 --report daily --mail-mode real
+main_exit 2 --once --mail-mode
+main_exit 2 --once --mail-mode unsupported
+main_exit 2 --once --mail-mode real --mail-mode real
 main_exit 7 --once --data-dir 'data set'
 [[ ! -e "$suite/data set" ]] || fail 'missing alerts dependency caused writes'
 export CALL_LOG=$work/calls
@@ -377,6 +383,11 @@ ALERT_RESULT=5 "$entry" --once --data-dir 'data set' || rc=$?
 [[ $rc == 5 ]] || fail 'delivery failure exit'
 printf '%s\n' monitor.sh --once --data-dir "$suite/data set" alerts.sh --once --data-dir "$suite/data set" > "$work/expected"
 cmp "$CALL_LOG" "$work/expected" || fail 'once delegation'
+: > "$CALL_LOG"
+main_exit 0 --mail-mode real --once --config 'cfg file' --data-dir 'data set'
+printf '%s\n' monitor.sh --once --config "$suite/cfg file" --data-dir "$suite/data set" \
+    alerts.sh --once --config "$suite/cfg file" --data-dir "$suite/data set" --mail-mode real > "$work/expected"
+cmp "$CALL_LOG" "$work/expected" || fail 'real mail mode was not forwarded exclusively to alerts'
 for period in daily weekly; do
     : > "$CALL_LOG"
     rc=0
@@ -385,6 +396,55 @@ for period in daily weekly; do
     printf '%s\n' report.sh "$period" --config "$suite/cfg file" > "$work/expected"
     cmp "$CALL_LOG" "$work/expected" || fail 'report delegation'
 done
+
+# Real alerts code, a fixture collector and a fake mail client.
+git init -q "$suite"
+cp -- "$root/scripts/alerts.sh" "$suite/scripts/"
+mail_bin=$work/mail-bin
+mkdir -- "$mail_bin"
+export SYSGUARD_MAIL_TEST_CAPTURE="$work/captured-mail"
+cat > "$mail_bin/mailx" <<'STUB'
+#!/usr/bin/env bash
+if [[ $# == 1 && $1 == --help ]]; then
+    printf '%s\n' 'Usage: mailx -s subject recipient'
+    exit 0
+fi
+[[ $# == 3 && $1 == -s && $3 == ops@example.test ]] || exit 91
+printf '%s\n' "$3" >> "$SYSGUARD_MAIL_TEST_CAPTURE"
+cat >> "$SYSGUARD_MAIL_TEST_CAPTURE"
+STUB
+cat > "$mail_bin/date" <<'STUB'
+#!/usr/bin/env bash
+if [[ $# == 1 && $1 == +%s ]]; then
+    printf '%s\n' 1800000000
+else
+    exec /usr/bin/date "$@"
+fi
+STUB
+chmod +x -- "$mail_bin/mailx" "$mail_bin/date"
+seed_alert_data() {
+    mkdir -- "$suite/$1"
+    local sample_stamp
+    sample_stamp=$(date -u -d '@1800000000' '+%Y-%m-%dT%H:%M:%S%:z')
+    printf '%s\n%s,90.0,40.0,40.0\n' "$expected_header" "$sample_stamp" > "$suite/$1/metrics.csv"
+}
+printf '%s\n' MAIL_ENABLED=1 EMAIL_TO=ops@example.test > "$suite/config/local.conf"
+seed_alert_data default-mail
+PATH="$mail_bin:$PATH" main_exit 0 --once --data-dir default-mail
+grep -Fq ',captured,mock' "$suite/default-mail/alerts/delivery.csv" || fail 'default mail mode with mail enabled'
+[[ ! -e $SYSGUARD_MAIL_TEST_CAPTURE ]] || fail 'default mode invoked mailx'
+seed_alert_data real-mail
+PATH="$mail_bin:$PATH" main_exit 0 --once --data-dir real-mail --mail-mode real
+grep -Fq ',submitted,mailx_exit_zero' "$suite/real-mail/alerts/delivery.csv" || fail 'explicit real mail mode'
+grep -Fq '90.0%' "$SYSGUARD_MAIL_TEST_CAPTURE" || fail 'fake mailx did not receive fixture body'
+cp -- "$SYSGUARD_MAIL_TEST_CAPTURE" "$work/previous-mail"
+printf '%s\n' MAIL_ENABLED=0 > "$work/mail-disabled.conf"
+seed_alert_data disabled-mail
+PATH="$mail_bin:$PATH" main_exit 2 --once --data-dir disabled-mail --mail-mode real --config "$work/mail-disabled.conf"
+grep -Fq 'real mail disabled' "$work/stderr" || fail 'missing disabled-mail diagnostic'
+[[ ! -e $suite/disabled-mail/alerts ]] || fail 'disabled real mail wrote alert state'
+cmp "$work/previous-mail" "$SYSGUARD_MAIL_TEST_CAPTURE" || fail 'disabled real mail invoked mailx'
+printf '%s\n' 'PASS: default mock, explicit real forwarding, and disabled-mail rejection with fake mailx'
 
 # A foreground child with normal signal dispositions receives each signal by PID.
 # The sleep shim records the exact wait point and then uses exec to retain its PID.

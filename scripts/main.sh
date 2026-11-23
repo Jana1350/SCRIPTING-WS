@@ -2,7 +2,8 @@
 
 main_usage() {
     printf '%s\n' 'Usage: main.sh --help' \
-        '       main.sh --status|--once|--report daily|--report weekly [--config FILE] [--data-dir DIR]'
+        '       main.sh --status|--report daily|--report weekly [--config FILE] [--data-dir DIR]' \
+        '       main.sh --once [--config FILE] [--data-dir DIR] [--mail-mode real]'
 }
 
 require_script() {
@@ -50,7 +51,7 @@ main() {
     [[ $script_dir != "${BASH_SOURCE[0]}" ]] || script_dir=.
     repo_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd -P) || return 4
     local mode='' period='' config='' data='' path
-    local -a options=()
+    local -a options=() alert_options=()
     while (( $# )); do
         case $1 in
             --once|--status|--report)
@@ -76,10 +77,16 @@ main() {
                 options+=("$1" "$path")
                 shift
                 ;;
+            --mail-mode)
+                [[ ${2-} == real && ${#alert_options[@]} == 0 ]] || return 2
+                alert_options=(--mail-mode real)
+                shift
+                ;;
             *) return 2 ;;
         esac
         shift
     done
+    [[ $mode == --once || ${#alert_options[@]} == 0 ]] || return 2
 
     local scripts=$repo_root/scripts
     case $mode in
@@ -92,7 +99,7 @@ main() {
         --once)
             require_script "$scripts/monitor.sh" && require_script "$scripts/alerts.sh" || return 7
             "$scripts/monitor.sh" --once "${options[@]}" || return "$?"
-            "$scripts/alerts.sh" --once "${options[@]}"
+            "$scripts/alerts.sh" --once "${options[@]}" "${alert_options[@]}"
             ;;
         --report)
             require_script "$scripts/report.sh" || return 7
