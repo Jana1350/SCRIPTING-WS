@@ -46,6 +46,27 @@ if [[ $# == 1 && $1 == +%s ]]; then echo 1800000000; else exec /usr/bin/date "$@
 CLOCK
     chmod +x "$temp/bin/date"
 }
+test_disk_mount() (
+    sandbox
+    freeze_clock
+    local mount='disk @root' path data stamp
+    stamp=$(date -u -d '@1800000000' '+%Y-%m-%dT%H:%M:%S%:z')
+    ln -s / "$repo/$mount"
+    cd "$temp"
+    for path in "$mount" "$repo/$mount"; do
+        data=$(mktemp -d "$temp/sample.XXXXXXXX")
+        printf '%s\n%s,10.0,20.0,95.0\n' 'timestamp,cpu_percent,memory_percent,disk_percent' "$stamp" > "$data/metrics.csv"
+        printf 'DISK_MOUNT=%s\n' "$path" > "$repo/config/local.conf"
+        expect 0 "$repo/scripts/alerts.sh" --once --data-dir "$data" --mail-mode mock
+        grep -Fxq "$stamp,disk,NORMAL,CRITICAL,95.0,95,escalation" "$data/alerts/events.csv"
+    done
+    ln -s / "$repo/disk;invalid"
+    for path in '' missing 'disk;invalid'; do
+        printf 'DISK_MOUNT=%s\n' "$path" > "$repo/config/local.conf"
+        expect 2 "$repo/scripts/alerts.sh" --once --data-dir "$data" --mail-mode mock
+    done
+    echo 'PASS relative and absolute disk mounts, alert evaluation and invalid mounts'
+)
 test_locks() (
     sandbox
     freeze_clock
@@ -191,4 +212,4 @@ FAILMOVE
     expect 4 "$repo/scripts/alerts.sh" --once --data-dir "$csv"
     echo 'PASS alert transitions, persistence, validation, locks and mock delivery'
 }
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then (test_alerts); test_locks; fi
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then test_disk_mount; (test_alerts); test_locks; fi

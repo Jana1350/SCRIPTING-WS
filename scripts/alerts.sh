@@ -21,6 +21,7 @@ read_config() {
             *) die 2 "unknown config key";;
         esac
         [[ ! ${seen[$key]+x} && ! $value =~ [[:cntrl:]] ]] || die 2 "duplicate key or control character"
+        [[ $key != DISK_MOUNT || $value != *['$`;&|<>()']* ]] || die 2 "invalid disk mount"
         seen[$key]=1
         cfg[$key]=$value
     done < "$file"
@@ -50,7 +51,11 @@ load_config() {
        cfg[MAX_DATA_AGE_SECONDS] >= cfg[WATCH_INTERVAL_SECONDS]+cfg[CPU_SAMPLE_SECONDS] &&
        cfg[LOG_RETENTION_DAYS] > 0 )) || die 2 "invalid intervals"
     [[ ${cfg[MAIL_ENABLED]-} =~ ^[01]$ && ${cfg[REPORT_PDF_ENABLED]-} =~ ^[01]$ ]] || die 2 "invalid boolean"
-    [[ ${cfg[DISK_MOUNT]-} =~ ^/[[:alnum:]_./[:blank:]-]*$ && -d ${cfg[DISK_MOUNT]} && -x ${cfg[DISK_MOUNT]} ]] || die 2 "invalid disk mount"
+    local mount=${cfg[DISK_MOUNT]-}
+    [[ -n $mount ]] || die 2 "invalid disk mount"
+    mount=$(absolute "$mount")
+    [[ -d $mount ]] || die 2 "invalid disk mount"
+    cfg[DISK_MOUNT]=$(cd -P -- "$mount" && pwd -P) || die 4 "inaccessible disk mount"
     local address='^[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
     [[ ${cfg[EMAIL_TO]+x} ]] || die 2 "missing EMAIL_TO"
     if [[ -n ${cfg[EMAIL_TO]} || ${cfg[MAIL_ENABLED]} == 1 ]]; then
