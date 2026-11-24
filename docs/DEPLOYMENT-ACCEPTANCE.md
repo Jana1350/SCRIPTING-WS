@@ -1,6 +1,6 @@
 # Deployment acceptance, 24 November 2026
 
-Member B verified the integrated scripts from base commit `e992eb2` on Ubuntu 24.04.4 LTS under WSL2. The cron daemon was active and enabled. All times below are UTC.
+Chetan Yalla verified the integrated scripts from base commit `e992eb2` on Ubuntu 24.04.4 LTS under WSL2. The cron daemon was active and enabled. All times below are UTC.
 
 | Check | Observation |
 |---|---|
@@ -10,7 +10,7 @@ Member B verified the integrated scripts from base commit `e992eb2` on Ubuntu 24
 | Isolation and recovery | The test used its own checkout, metrics, locks and state, with a single-use submission guard. The temporary entry was removed, the original crontab compared equal byte for byte, and production continued the next minute. A separate fake-crontab rehearsal exercised switching to mock and uninstalling while preserving unrelated jobs. |
 | Fresh-checkout onboarding | The wizard collected a real first sample in a checkout with spaces and no private config. This was a fresh checkout on a machine with prerequisites already installed. Independent fresh-machine deployment remains pending. |
 | Wizard regression tests | Fake mail and crontab cover monitoring without Gmail credentials, explicit approvals, recipient changes, private config, `OFF`, repeat execution and unrelated job preservation. Failure and interruption fixtures cover partial `OFF` completion and candidate cleanup. These tests do not contact SMTP or change the real crontab. |
-| Local reports and rotation | The installed jobs matched the contract. Daily reports run at 00:10, weekly reports on Monday at 00:20, and rotation daily at 00:30. HTML, PDF, charts, gzip and archive consistency passed isolated tests. No scheduled maintenance execution had occurred by the evidence cutoff. Member C should confirm the first live outputs and corresponding daemon times. |
+| Local reports and rotation | The installed jobs matched the contract. Daily reports run at 00:10, weekly reports on Monday at 00:20, and rotation daily at 00:30. HTML, PDF, charts, gzip and archive consistency passed isolated tests. No scheduled maintenance execution had occurred by the evidence cutoff. Arnav Nakka should confirm the first live outputs and corresponding daemon times. |
 
 The release regression runner requires seven suites, including the wizard and the positive-warning contract test. The live delivery and cron evidence above applies to the stated deployment baseline. See the release candidate acceptance report for the exact combined revision, isolated rendering and mock operational results. Independent fresh-machine deployment and live scheduled maintenance evidence are still pending.
 

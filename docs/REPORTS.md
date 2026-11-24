@@ -1,6 +1,6 @@
 # SysGuard reporting and rotation
 
-Member C owns the daily and weekly reports, gnuplot charts, PDF generation, and rotation. Member A collects CPU, memory, and filesystem measurements and appends them to the active metrics CSV. `report.sh` reads a consistent snapshot of that file and the relevant archives. `rotate_logs.sh` moves completed days into compressed archives that the reporter can read. Member B owns scheduling and latest-sample alerts. The [shared contract](CONTRACTS.md) defines the interfaces.
+Arnav Nakka owns the daily and weekly reports, gnuplot charts, PDF generation, and rotation. Janardhan Reddy collects CPU, memory, and filesystem measurements and appends them to the active metrics CSV. `report.sh` reads a consistent snapshot of that file and the relevant archives. `rotate_logs.sh` moves completed days into compressed archives that the reporter can read. Chetan Yalla owns scheduling and latest-sample alerts. The [shared contract](CONTRACTS.md) defines the interfaces.
 
 ## Dependencies
 
@@ -46,7 +46,7 @@ Both scripts resolve relative CLI paths against the repository root. The shared 
 
 | Path relative to the repository | Purpose |
 |---|---|
-| `data/metrics.csv` | A appends metrics. C replaces the active file during rotation. |
+| `data/metrics.csv` | Janardhan Reddy appends metrics. Arnav Nakka replaces the active file during rotation. |
 | `data/archive/metrics-YYYY-MM-DD.csv.gz` | One compressed CSV with its own header per completed local date. |
 | `runtime/metrics.lock` | Persistent lock for the default `data/` directory. An override resolving to the same default directory uses this lock too. |
 | `<custom-data-dir>/.metrics.lock` | Persistent lock for another data directory. Use a physical directory path for rotation. |
@@ -191,7 +191,7 @@ Failures are reported on stderr. Before retrying, check the first diagnostic and
 
 ### Pull-request checklist
 
-- [ ] Review Member C's diff against the current shared baseline and confirm the owned-file scope.
+- [ ] Review Arnav Nakka's diff against the current shared baseline and confirm the owned-file scope.
 - [ ] Attach the executed test commands, exit statuses, and redacted fixture results.
 - [ ] Verify the diff excludes generated reports, archives, runtime files, and local configuration.
 - [ ] Record pending scheduled reporting and rotation checks, and obtain team review before merge.
@@ -203,7 +203,7 @@ Failures are reported on stderr. Before retrying, check the first diagnostic and
 - [ ] Preview the rotation, rotate the fixture, and show `gzip -t` and unchanged figures.
 - [ ] Explain the independent publication renames and the retention preview scope.
 
-## Member C viva prompts
+## Arnav Nakka's viva prompts
 
 | Question | Short answer |
 |---|---|

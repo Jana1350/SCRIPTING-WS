@@ -24,9 +24,9 @@ Exception: a deliberately approved **phase-0 read-only repo audit** may examine 
 
 ## Ownership and proposed responsibility
 
-- A: `scripts/monitor.sh`, `scripts/main.sh`, config templates, baseline `AGENTS.md`, `docs/CONTRACTS.md` after unanimous review, common fixtures, `tests/test_monitor.sh`, `tests/run_all.sh`, top-level README and Git conventions.
-- B: `scripts/alerts.sh`, `scripts/setup_cron.sh`, `tests/test_alerts.sh`, `tests/test_cron.sh`, `docs/OPERATIONS.md`.
-- C: `scripts/report.sh`, `scripts/rotate_logs.sh`, `tests/test_reports.sh`, `tests/test_rotation.sh`, `docs/REPORTS.md`; optional static dashboard only after approval.
+- Janardhan Reddy: `scripts/monitor.sh`, `scripts/main.sh`, config templates, baseline `AGENTS.md`, `docs/CONTRACTS.md` after unanimous review, common fixtures, `tests/test_monitor.sh`, `tests/run_all.sh`, top-level README and Git conventions.
+- Chetan Yalla: `scripts/alerts.sh`, `scripts/setup_cron.sh`, `tests/test_alerts.sh`, `tests/test_cron.sh`, `docs/OPERATIONS.md`.
+- Arnav Nakka: `scripts/report.sh`, `scripts/rotate_logs.sh`, `tests/test_reports.sh`, `tests/test_rotation.sh`, `docs/REPORTS.md`; optional static dashboard only after approval.
 - No one silently edits another role's modules or alters approved CSV header, CLI flags, exit codes, config keys, report date semantics, lock path, or fixtures. Interface changes require a team decision and new contract/fixture version.
 
 ## Engineering quality bar
@@ -41,6 +41,6 @@ Exception: a deliberately approved **phase-0 read-only repo audit** may examine 
 
 0. Audit existing work, official brief, repo, deps, and contracts **read-only**.
 1. Approve roles, repo, fixture v1, contracts, and agent rules as a reviewed baseline.
-2. Implement A's monitor; then B/C independently use approved fixture v1.
+2. Implement Janardhan Reddy's monitor. Chetan Yalla and Arnav Nakka then independently use approved fixture v1.
 3. Merge via reviewed PRs; run integrated checks, genuine mail and cron acceptance only with user permission.
 4. Generate release/viva evidence; consider dashboard only after mandatory functionality works.
