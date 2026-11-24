@@ -47,12 +47,14 @@ schedule_mode() {
     if result=$(crontab -l 2>"$work/cron-error" | awk '
         $0 == "# BEGIN SysGuard System Health Monitor v1" { starts++; inside=1; next }
         $0 == "# END SysGuard System Health Monitor v1" { if (!inside) bad=1; inside=0; ends++; next }
+        inside && index($0, "\047--config\047") { explicit=1 }
         inside && /\047monitor\047 \047cron-monitor.lock\047/ {
             monitors++; real = index($0, "\047--mail-mode\047 \047real\047") != 0
         }
         END {
             if (!starts && !ends) print "none"
             else if (bad || inside || starts!=1 || ends!=1 || monitors!=1) print "unknown"
+            else if (explicit) print (real ? "explicit-real" : "explicit-mock")
             else print (real ? "real" : "mock")
         }'); then echo "$result"
     else
@@ -107,6 +109,11 @@ prepare_email() {
     # Coordinate with other wizards and the managed crontab writer.
     if ! flock -n 9; then echo 'Another setup is in progress. Try email setup again later.'; return; fi
     mode=$(schedule_mode)
+    if [[ $mode == explicit-* ]]; then
+        echo 'An explicit schedule config controls delivery. Local email setup skipped.'
+        if [[ $mode == explicit-real ]]; then echo 'OFF did not run: scheduled email remains enabled.'; fi
+        return 0
+    fi
     if [[ $mode == unknown ]]; then echo 'Cannot verify the current schedule. Email settings preserved.'; return; fi
     # Reload under the setup lock before choosing or reusing a recipient.
     private_path || return 2
@@ -236,6 +243,8 @@ schedule=$current
 if [[ $current == mock || $current == real ]] && ask "Remove the current $current SysGuard schedule for $user?"; then
     if "$scripts/setup_cron.sh" --uninstall; then schedule=$(schedule_mode)
     else schedule="$(schedule_mode) (removal failed)"; fi
+elif [[ $current == explicit-* ]]; then
+    echo 'Preserved the explicit-config schedule. To change it, use setup_cron.sh with the original --config FILE.'
 elif [[ $daemon != running || $current == unavailable ]]; then
     echo 'Scheduling needs the Ubuntu cron package and a running cron daemon. Check systemctl status cron.'
 elif [[ $current == unknown ]]; then
