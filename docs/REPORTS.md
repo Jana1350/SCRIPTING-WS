@@ -19,6 +19,7 @@ PDF generation was exercised with WeasyPrint 67.0. The converter and its PDF che
 ```text
 scripts/report.sh daily  [--date YYYY-MM-DD] [--config FILE] [--data-dir DIR] [--output-dir DIR]
 scripts/report.sh weekly [--date YYYY-MM-DD] [--config FILE] [--data-dir DIR] [--output-dir DIR]
+scripts/report.sh today  [--config FILE] [--data-dir DIR] [--output-dir DIR]
 scripts/report.sh --help
 scripts/rotate_logs.sh [--as-of YYYY-MM-DD] [--config FILE] [--data-dir DIR] [--dry-run]
 scripts/rotate_logs.sh --help
@@ -29,6 +30,7 @@ From the repository root, run the following commands for the default report peri
 ```bash
 scripts/report.sh daily
 scripts/report.sh weekly
+scripts/report.sh today
 scripts/rotate_logs.sh --dry-run
 ```
 
@@ -40,7 +42,7 @@ Both scripts resolve relative CLI paths against the repository root. The shared 
 | `WATCH_INTERVAL_SECONDS` | `60` | Report coverage counts gaps between valid samples that exceed this interval. |
 | `LOG_RETENTION_DAYS` | `30` | Sets the age threshold for the retention preview. |
 
-`TZ` sets the reporting and rotation timezone, with the system timezone as fallback. SysGuard V1.0 uses UTC for deployment. Verify UTC for the collector, reports, rotation, and the scheduler. CSV timestamps carry their own offsets and are converted to absolute instants before comparison. The commands use the C locale for numeric parsing.
+`TZ` sets the timezone for completed daily and weekly reports and rotation, with the system timezone as fallback. The current-day report always uses UTC. SysGuard V1.0 uses UTC for deployment. Verify UTC for the collector, reports, rotation, and the scheduler. CSV timestamps carry their own offsets and are converted to absolute instants before comparison. The commands use the C locale for numeric parsing.
 
 ## Data and locks
 
@@ -53,7 +55,8 @@ Both scripts resolve relative CLI paths against the repository root. The shared 
 | `runtime/report.lock` | Serializes report runs through rendering and publication. |
 | `reports/daily/YYYY-MM-DD.html` and `.pdf` | Daily output named for the date represented. |
 | `reports/weekly/YYYY-MM-DD_to_YYYY-MM-DD.html` and `.pdf` | Weekly output named for its inclusive Monday and Sunday dates. |
-| `reports/charts/` | Versioned PNGs referenced by relative links from daily and weekly HTML. |
+| `reports/today/YYYY-MM-DD.html` and `.pdf` | Incomplete report for the named UTC date. PDF is published when enabled. |
+| `reports/charts/` | Versioned PNGs referenced by report HTML. Current-day charts use `today-YYYY-MM-DD-<sha256>.png`. |
 
 `--data-dir` replaces the `data/` root for both active and archived input. `--output-dir` replaces the `reports/` root for all report outputs. The exact CSV header is:
 
@@ -69,13 +72,16 @@ The monitor and rotator acquire an exclusive `flock` before opening the active C
 
 - Daily defaults to the previous completed local date. `--date` selects a specific date.
 - Weekly defaults to the latest completed Monday–Sunday. `--date` must be the first Monday. A run on Monday, November 23, 2026 defaults to November 16 through 22.
-- Every window starts at local midnight inclusive and ends at the next period boundary exclusive. The conversion to instants accounts for offset and daylight-saving changes.
+- Completed windows start at local midnight inclusive and end at the next period boundary exclusive. The conversion to instants accounts for offset and daylight-saving changes.
+- `today` starts at UTC midnight inclusive and ends at a single captured current instant exclusive. This gives a partial report labeled incomplete, with no future samples. It does not accept `--date`. At UTC midnight, the window can be empty. A valid empty window publishes **NO DATA** without a chart. HTML and optional PDF remain separate from completed daily and weekly artifacts, and the scheduled jobs retain their existing periods.
 - The reporter validates headers, row syntax, ranges, timestamps, and order. It combines relevant gzip archives and active data, collapses identical measurements at the same instant, and fails on differing measurements at the same instant across sources. Skipped malformed or out-of-order rows are disclosed in the report. Invalid headers, corrupt candidate gzip archives, and a damaged selection with no usable samples produce an error.
 - Snapshot copies must match their sources byte for byte while the metrics lock is held. The reporter also checks that parsing reads every record from each CSV. A failed copy or incomplete read returns `4` and preserves completed reports.
 - `awk` calculates count, minimum, maximum, and arithmetic mean for each metric using validated in-window samples. The mean is the sum of values divided by the sample count. The implementation accumulates integer tenths before formatting min and max to one decimal and mean to two. A valid empty window shows **NO DATA**, a count of zero, and `N/A` statistics.
 - HTML and PDF show the elapsed time from the inclusive start to the first valid sample and from the last valid sample to the exclusive end. An empty window shows its full unobserved duration. These values describe sample timing. A coverage percentage would require an agreed sampling tolerance.
 
 The reporter feeds validated epochs and numeric percentages to gnuplot to create a PNG with three panels for CPU, memory, and disk. The time axis shows UTC offsets. Plot lines break across gaps longer than the configured watch interval. HTML contains the reporting window, timezone, coverage, statistics, warnings, and a chart link. HTML, PDF, and chart files are local artifacts. When PDF is enabled, WeasyPrint renders staged HTML using local chart assets. `file` and `pdfinfo` check the output format and readable pages. `pdfimages` checks for the actual embedded chart when samples exist.
+
+In the [terminal control center](CONTROL_CENTER.md#reports-and-archives), **6 → 1** generates today's report. **7 → 1** opens only the PDF for the current UTC date, with confirmation. If it is absent, generate today's report first. Use **7 → 4** to browse older partial reports in their folder.
 
 ## Publication, rotation, and recovery
 
@@ -169,7 +175,7 @@ The Phase 6 fixture run confirmed the figures above, matching HTML and PNGs, and
 )
 ```
 
-The report suite covers the periods, offsets, CSV errors, charts, PDF content and embedded images, lock contention, and publication rollback. The rotation suite covers cutoff dates, compression and write failures, retries, lock mapping, symlink paths, and retention preview. Both use temporary fixtures.
+The report suite covers completed periods, the UTC current-day cutoff, empty windows, offsets, CSV errors, charts, PDF content and embedded images, lock contention, and publication rollback. The rotation suite covers cutoff dates, compression and write failures, retries, lock mapping, symlink paths, and retention preview. Both use temporary fixtures.
 
 | Exit | Meaning |
 |---:|---|

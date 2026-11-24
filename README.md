@@ -2,6 +2,14 @@
 
 SysGuard samples CPU, memory, and filesystem usage on WSL Ubuntu and records complete measurements in a CSV. Janardhan Reddy owns the Bash monitor, configuration, and orchestration. Chetan Yalla owns alerts, email, and cron. Arnav Nakka owns reports, charts, and log rotation. The shared interface is specified in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
+## Terminal control center (V1.1)
+
+Run `bash sysguard.sh` from the V1.1 checkout. Use **1** or **5** for local settings, **3** to collect a sample, **6** to generate reports, **7** to view them, and **9** to inspect status. When another checkout owns cron, **1** offers local recipient and threshold settings and keeps that schedule active. [Full numbered menu](docs/CONTROL_CENTER.md)
+
+- **First run.** A fresh clone can collect metrics and capture mock alerts with the tracked defaults. Use **5 → 1** to set the recipient and **5 → 2** to enable real mail in this checkout. The existing sender comes from the Linux user's mail transport. A new machine needs its own working SMTP transport for real email.
+- **Real mail is opt-in per operation.** Option **3** asks before manual real processing. Option **2** asks separately about scheduled real mail and cron installation. Only qualifying new alert transitions cause a submission. The delivery ledger can confirm mailx accepted a submission. Check inbox receipt separately.
+- **Reports.** Use **6 → 1** for a partial UTC report in `reports/today/`. The other choices cover the previous completed day or Monday–Sunday week. Use **7** to select an existing PDF, folder, HTML report, or chart. Opening requires confirmation. The launcher prints the absolute path and a fallback command when the opener is unavailable or fails.
+
 ## Run SysGuard locally
 
 On Ubuntu or WSL Ubuntu, open a terminal as the Linux user who should own the files and scheduled jobs. A fresh machine needs Git access, Bash, awk, GNU coreutils, Linux procfs, and util-linux flock for local monitoring. The wizard checks the environment. Install the optional scheduling, report, and mail dependencies for the features you intend to use.
