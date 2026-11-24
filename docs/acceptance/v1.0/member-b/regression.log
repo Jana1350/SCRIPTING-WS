@@ -1,0 +1,137 @@
+PASS: unsafe default and custom locks, parent paths, persistent inode and descriptor mismatch
+PASS: rotation lock probe exit 6, writer during rotation exit 6, retry exit 0
+PASS: monitor fixtures (locale C.UTF-8, permission check exercised)
+PASS: watch skipped two busy samples and resumed on schedule after release
+sysguard: loaded configuration from /tmp/tmp.fAA9SCDV6Q/project with spaces/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.fAA9SCDV6Q/project with spaces/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.fAA9SCDV6Q/shared-valid.conf
+sysguard: loaded configuration from /tmp/tmp.fAA9SCDV6Q/project with spaces/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.fAA9SCDV6Q/shared-valid.conf
+sysguard: unreadable configuration file: /tmp/tmp.fAA9SCDV6Q/project with spaces/unreadable.conf
+sysguard: unreadable configuration file: /tmp/tmp.fAA9SCDV6Q/project with spaces/config/defaults.conf
+sysguard: configuration directory is inaccessible: /tmp/tmp.fAA9SCDV6Q/project with spaces/config
+PASS: unreadable explicit, implicit and default configuration failures
+sysguard: loaded configuration from /tmp/tmp.fAA9SCDV6Q/project with spaces/config/defaults.conf
+PASS: shared validation, side-effect-free rejection and mock without a recipient
+PASS: mock default, real-mail preflight, runtime delivery failure and preserved metrics
+PASS: relative and absolute monitor and main invocation with CDPATH=.
+PASS: watch SIGTERM during sampling and SIGINT between samples
+PASS: watch cadence, read-only status, dependency checks and delegation
+PASS: changed C9 row rejected before suite execution (exit 3)
+Verified 53 foreground monitor exit cases and 115 main exit cases via helpers.
+PASS alert transitions, persistence, validation, locks and mock delivery
+PASS default, explicit-default and custom locks, contention and unsafe paths
+PASS recipient validation before mailx invocation or alert state changes
+PASS shared mount validation and rejection of a control character in the resolved path
+PASS invalid config rejected before collection, shared I/O status and standalone config
+PASS shared config validation before rendering, crontab access or runtime writes
+PASS real cron preview, install and scheduled command require defaults with an explicit config
+PASS cron real-mail opt-in, fake installation idempotence and fixture mail capture
+PASS cron validates raw config paths before rendering or accessing crontab
+PASS cron rejects unsafe checkout roots before rendering or accessing crontab
+PASS cron preview, scheduled command quoting, preservation, idempotence and unsafe table refusal
+PASS: help, arguments, dates, and configuration errors
+PASS: shared configuration boundaries, normalization, precedence, and validation before writes
+PASS: 3 samples per metric; CPU min/max/mean 20/60/40, memory 50/70/60, disk 60/80/70; repeated HTML matches
+PASS: approved v1 fixture and repository-relative paths from a different working directory
+PASS: relative report invocation with CDPATH set
+PASS: missing, header-only, empty, and out-of-window inputs yield NO DATA
+PASS: bad headers, invalid rows, ordering, and truncated or binary CSV
+PASS: date and DST boundaries, previous-day default, and leading, trailing, or empty coverage
+PASS: contention on default or override metrics locks and the report lock returns 6
+PASS: output error and failed atomic replacement preserve the previous report and clean staging
+2026-11-20.html PNG: PNG image data, 1200 x 900, 8-bit/color RGB, non-interlaced
+2026-11-16_to_2026-11-22.html PNG: PNG image data, 1200 x 900, 8-bit/color RGB, non-interlaced
+PASS: weekly dates and boundaries, archived malformed row, mixed offsets, exact overlap, and repeatable charts
+2026-11-16.html PNG: PNG image data, 1200 x 900, 8-bit/color RGB, non-interlaced
+PASS: conflicts and corrupt gzip fail explicitly; archive-only and header-only periods are handled
+PASS: weekly report uses calendar boundaries across a DST transition
+2026-11-16_to_2026-11-22.html PNG: PNG image data, 1200 x 900, 8-bit/color RGB, non-interlaced
+PASS: missing gnuplot, chart rendering failure, and chart publication failure preserve report integrity
+2026-11-20.html PNG: PNG image data, 1200 x 900, 8-bit/color RGB, non-interlaced
+2026-11-20.pdf: PDF document, version 1.7
+Pages:           2
+Embedded 1200 x 900 charts: 1
+2026-11-16_to_2026-11-22.pdf: PDF document, version 1.7
+Pages:           2
+Embedded 1200 x 900 charts: 1
+PASS: daily and weekly PDF content, statistics, coverage, embedded charts, and repeat generation
+2026-12-07.pdf: PDF document, version 1.7
+Pages:           1
+Embedded 1200 x 900 charts: 0
+2026-12-07_to_2026-12-13.pdf: PDF document, version 1.7
+Pages:           1
+Embedded 1200 x 900 charts: 0
+PASS: daily and weekly NO DATA PDFs with no embedded charts
+PASS: copy failures, short CSV and gzip snapshots, premature EOF, and truncated rows preserve completed reports
+PASS: incompatible converters return 7 before converting or replacing existing reports
+PASS: conversion, invalid PDF, missing chart, and output directory errors preserve the previous report
+old HTML and new PDF observed between renames
+2026-11-20.html PNG: PNG image data, 1200 x 900, 8-bit/color RGB, non-interlaced
+PASS: PDF-first publication, rollback with and without a prior PDF, and HTML-only regeneration
+All daily and weekly report tests passed.
+PASS: CLI, date validation, and configuration failure leave no output
+PASS: shared configuration, override precedence, and rotation without report tools
+PASS: missing and header-only active logs are no-ops, including a relative dry-run with CDPATH set
+gzip -t metrics-2026-11-20.csv.gz: exit 0
+PASS: first-use rotation exits 0 under the shared lock, concurrent writer gets 6, and retry preserves its sample
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/test.conf
+Wrote /tmp/sysguard-test-rotation.tt4HFvKL/before/daily/2026-11-20.html
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/test.conf
+Wrote /tmp/sysguard-test-rotation.tt4HFvKL/before/weekly/2026-11-16_to_2026-11-22.html
+gzip -t metrics-2026-11-16.csv.gz: exit 0
+gzip -t metrics-2026-11-20.csv.gz: exit 0
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/test.conf
+Wrote /tmp/sysguard-test-rotation.tt4HFvKL/after/daily/2026-11-20.html
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/test.conf
+Wrote /tmp/sysguard-test-rotation.tt4HFvKL/after/weekly/2026-11-16_to_2026-11-22.html
+PASS: local midnights, original rows, current-day preservation, and repeatability
+PASS: daily/weekly counts 2/5, all min/max/mean values, and PNGs match before and after rotation
+PASS: strict CSV validation rejects corrupt input without replacing it
+gzip -t metrics-2026-11-20.csv.gz: exit 0
+PASS: matching archives are reused; mismatching or corrupt archives block publication
+PASS: default and override lock contention, persistent inode, and retention preview without deletion
+PASS: symlink escapes through data, active CSV, archive, and lock paths are rejected
+gzip -t metrics-2026-11-16.csv.gz: exit 0
+gzip -t metrics-2026-11-20.csv.gz: exit 0
+gzip -t metrics-2026-11-16.csv.gz: exit 0
+gzip -t metrics-2026-11-20.csv.gz: exit 0
+gzip -t metrics-2026-11-16.csv.gz: exit 0
+gzip -t metrics-2026-11-16.csv.gz: exit 0
+gzip -t metrics-2026-11-20.csv.gz: exit 0
+gzip -t metrics-2026-11-16.csv.gz: exit 0
+gzip -t metrics-2026-11-20.csv.gz: exit 0
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/test.conf
+Wrote /tmp/sysguard-test-rotation.tt4HFvKL/during-recovery/daily/2026-11-20.html
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/sysguard-test-rotation.tt4HFvKL/checkout/test.conf
+Wrote /tmp/sysguard-test-rotation.tt4HFvKL/during-recovery/weekly/2026-11-16_to_2026-11-22.html
+gzip -t metrics-2026-11-16.csv.gz: exit 0
+gzip -t metrics-2026-11-20.csv.gz: exit 0
+PASS: gzip, staging, and publication failures preserve active data; retries preserve history without double counting
+All rotation tests passed.
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/SysGuard user's checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/custom settings.conf
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/SysGuard user's checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/custom settings.conf
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/SysGuard user's checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/SysGuard user's checkout/config/local.conf
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/SysGuard user's checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/SysGuard user's checkout/config/local.conf
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/SysGuard user's checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/SysGuard user's checkout/config/local.conf
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/SysGuard user's checkout/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.JVnlkmoUP7/SysGuard user's checkout/config/local.conf
+PASS wizard: fresh and private setup, explicit approvals, recipient changes, OFF recovery, candidate cleanup and crontab preservation
+sysguard: loaded configuration from /tmp/sysguard-rc-b-U8dm2kFI/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.sjBOY8fqyl/override
+sysguard: loaded configuration from /tmp/sysguard-rc-b-U8dm2kFI/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.sjBOY8fqyl/override
+sysguard: loaded configuration from /tmp/sysguard-rc-b-U8dm2kFI/config/defaults.conf
+sysguard: loaded configuration from /tmp/tmp.sjBOY8fqyl/override
+Suites: 7 passed, 0 skipped
