@@ -671,4 +671,60 @@ PATH="$work/without-weasyprint" expect_status 0 '' report --date "$REPORT_DATE"
 cmp -s -- "$SYSGUARD_TEST_OLD_PDF" "$daily_pdf" || fail 'HTML-only regeneration changed the previous PDF'
 assert_contains 'Valid samples: 1' "$html"
 printf '%s\n' 'PASS: PDF-first publication, rollback with and without a prior PDF, and HTML-only regeneration'
-printf '%s\n' 'All daily and weekly report tests passed.'
+
+(
+    data="$work/today fixtures"
+    csv=$data/metrics.csv
+    archive=$data/archive/metrics-2026-11-18.csv.gz
+    html=$output/today/2026-11-20.html
+    pdf=${html%.html}.pdf
+    mkdir -p -- "$data/archive" "$work/today-bin"
+    export REPORT_TEST_NOW REPORT_TEST_DATE REPORT_TEST_DATE_READS="$work/current-time-reads"
+    REPORT_TEST_NOW=$(date -u -d '2026-11-20 02:00:00' +%s)
+    REPORT_TEST_DATE=$(command -v date)
+    cat > "$work/today-bin/date" <<'EOF'
+#!/usr/bin/env bash
+if [[ $# == 1 && $1 == +%s ]]; then
+    printf 'read\n' >> "$REPORT_TEST_DATE_READS"
+    printf '%s\n' "$REPORT_TEST_NOW"
+else
+    exec "$REPORT_TEST_DATE" "$@"
+fi
+EOF
+    chmod +x -- "$work/today-bin/date"
+    export PATH="$work/today-bin:$PATH"
+
+    args=(bash "$script" today --data-dir "$data" --output-dir "$output")
+    expect_status 2 'invalid arguments' "${args[@]}" --date "$REPORT_DATE"
+    write_rows '2026-11-19T23:59:59+00:00,90.0,90.0,90.0' \
+        '2026-11-20T05:30:00+05:30,10.0,20.0,30.0' \
+        '2026-11-20T01:59:59+00:00,30.0,40.0,50.0' \
+        '2026-11-20T02:00:00+00:00,90.0,90.0,90.0' \
+        '2026-11-20T02:00:01+00:00,99.0,99.0,99.0'
+    printf '%s\n' "$HEADER" '2026-11-18T00:00:00+00:00,98.0,98.0,98.0' | gzip -c > "$archive"
+    find "$output/daily" "$output/weekly" "$output/charts" "$csv" "$archive" -type f -print0 |
+        xargs -0 sha256sum > "$work/before-today"
+
+    expect_status 0 '' "${args[@]}" --config "$pdf_config"
+    [[ $(wc -l < "$REPORT_TEST_DATE_READS") == 1 ]] || fail 'current clock read more than once'
+    assert_contains 'incomplete current-day report' "$html"
+    assert_contains 'Window: 2026-11-20 00:00:00 +00:00 (inclusive) to 2026-11-20 02:00:00 +00:00 (exclusive)' "$html"
+    assert_contains 'Valid samples: 2' "$html"
+    assert_metric 'CPU' 2 10.0% 30.0% 20.00%
+    verify_chart "$html"
+    assert_contains '../charts/today-2026-11-20-' "$html"
+    pdfinfo "$pdf" > /dev/null
+    pdfimages -list "$pdf" | awk 'NR>2 {image=1} END {exit !image}'
+    sha256sum -c "$work/before-today" > /dev/null
+
+    REPORT_TEST_NOW=$(date -u -d '2026-11-20 00:00:00' +%s)
+    args=(bash "$script" today --data-dir "$data" --output-dir "$work/midnight output")
+    html="$work/midnight output/today/2026-11-20.html"
+    expect_status 0 '' "${args[@]}" --config "$pdf_config"
+    assert_contains '<h2>NO DATA</h2>' "$html"
+    assert_contains 'Valid samples: 0' "$html"
+    pdfinfo "${html%.html}.pdf" > /dev/null
+    sha256sum -c "$work/before-today" > /dev/null
+)
+printf '%s\n' 'PASS: current-day UTC boundaries, one clock read, future exclusion, PDF/chart, NO DATA, and completed reports preserved'
+printf '%s\n' 'All daily, weekly and current-day report tests passed.'

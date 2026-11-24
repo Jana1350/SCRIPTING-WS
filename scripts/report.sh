@@ -8,22 +8,25 @@ diagnostic() {
 
 usage() {
     printf '%s\n' 'Usage: report.sh daily|weekly [--date YYYY-MM-DD] [--config FILE] [--data-dir DIR] [--output-dir DIR]' \
+        '       report.sh today [--config FILE] [--data-dir DIR] [--output-dir DIR]' \
         '       report.sh --help' \
         'Daily defaults to the previous completed local day.' \
         'Weekly defaults to the previous completed Monday–Sunday. An explicit date must be a Monday.' \
+        'Today covers UTC midnight up to the captured current instant (exclusive).' \
         'Dates use TZ or the system timezone. Relative paths resolve from the repository root.' \
         'REPORT_PDF_ENABLED=1 adds a PDF report using WeasyPrint.'
 }
 
 parse_args() {
     case ${1-} in
-        daily|weekly) period=$1 ;;
+        today|daily|weekly) period=$1 ;;
         *) return 2 ;;
     esac
     shift
     while (( $# )); do
         case $1 in
             --date|--config|--data-dir|--output-dir)
+                [[ $period != today || $1 != --date ]] || return 2
                 [[ ${2-} && $2 != --* && ! ${options[$1]+set} ]] || return 2
                 options[$1]=$2
                 shift 2
@@ -68,6 +71,15 @@ local_day_start() {
 
 resolve_window() {
     local today next_day canonical_day weekday days_back=1 days_in_period=1
+    if [[ $period == today ]]; then
+        export TZ=Etc/UTC
+        end=$(date +%s) &&
+            report_date=$(date -u -d "@$end" +%F) &&
+            start=$(date -u -d "$report_date 00:00:00" +%s) || return 3
+        report_name=$report_date
+        report_label="$report_date (incomplete current-day report)"
+        return 0
+    fi
     if [[ ${options[--date]+set} ]]; then
         report_date=${options[--date]}
     else
@@ -588,7 +600,8 @@ main() {
     output_root=$(repo_path "${options[--output-dir]:-reports}")
     output_dir=$output_root/$period
     if ! resolve_window; then
-        diagnostic 'invalid report date (expected a calendar date in YYYY-MM-DD, Monday for weekly)'
+        if [[ $period == today ]]; then diagnostic 'could not determine the current UTC reporting window'
+        else diagnostic 'invalid report date (expected a calendar date in YYYY-MM-DD, Monday for weekly)'; fi
         return 3
     fi
     if (( settings[REPORT_PDF_ENABLED] )); then
