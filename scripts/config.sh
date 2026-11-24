@@ -122,8 +122,8 @@ sysguard_config_load() {
     for _sc_metric in CPU MEMORY DISK; do
         _sc_warning=${_sc_values[${_sc_metric}_WARNING]}
         _sc_critical=${_sc_values[${_sc_metric}_CRITICAL]}
-        (( _sc_warning < _sc_critical && _sc_critical <= 100 &&
-            (_sc_hysteresis == 0 || _sc_hysteresis < _sc_warning) )) || return 2
+        (( _sc_warning > 0 && _sc_warning < _sc_critical && _sc_critical <= 100 &&
+            _sc_hysteresis < _sc_warning )) || return 2
     done
     (( _sc_values[CPU_SAMPLE_SECONDS] > 0 &&
         _sc_values[WATCH_INTERVAL_SECONDS] > _sc_values[CPU_SAMPLE_SECONDS] &&

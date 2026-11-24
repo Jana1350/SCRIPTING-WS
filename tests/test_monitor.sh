@@ -474,6 +474,8 @@ seed_alert_data() {
 }
 # Invalid shared configurations must stop before a collector or runtime lock.
 for invalid_config in 'CPU_WARNING=90' 'CPU_WARNING=91' \
+    $'CPU_WARNING=0\nALERT_HYSTERESIS_PERCENT=0' $'MEMORY_WARNING=0\nALERT_HYSTERESIS_PERCENT=0' \
+    $'DISK_WARNING=0\nALERT_HYSTERESIS_PERCENT=0' \
     $'CPU_WARNING=20\nALERT_HYSTERESIS_PERCENT=20' 'ALERT_HYSTERESIS_PERCENT=21' \
     'EMAIL_TO=first..last@example.test' $'MAIL_ENABLED=1\nEMAIL_TO=' 'MAIL_ENABLED=1' \
     'MAIL_ENABLED=00' 'REPORT_PDF_ENABLED=01' 'LOG_RETENTION_DAYS=1000000000000000000' \
@@ -505,6 +507,8 @@ sysguard_config_load "$suite" "$work/shared-valid.conf" parsed
 main_exit 0 --status --config "$work/shared-valid.conf"
 printf '%s\n' CPU_WARNING=20 ALERT_HYSTERESIS_PERCENT=19 > "$work/valid-hysteresis.conf"
 main_exit 0 --status --config "$work/valid-hysteresis.conf"
+printf '%s\n' CPU_WARNING=1 MEMORY_WARNING=1 DISK_WARNING=1 ALERT_HYSTERESIS_PERCENT=0 > "$work/min-warning.conf"
+main_exit 0 --status --config "$work/min-warning.conf"
 
 # Reject output attributes that coerce values, without touching caller data.
 for attributes in Ai Au Al; do
@@ -600,7 +604,7 @@ PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 2 --once --data-dir ab
     --mail-mode real --config "$work/mail-disabled.conf"
 [[ ! -s $CALL_LOG && ! -e $suite/absent-mail && ! -e $suite/runtime && ! -e $SYSGUARD_MAIL_TEST_CALLS ]] ||
     fail 'disabled real mail created activity in a fresh checkout'
-printf '%s\n' CPU_WARNING=0 ALERT_HYSTERESIS_PERCENT=0 MAIL_ENABLED=0 EMAIL_TO= > "$work/empty-recipient.conf"
+printf '%s\n' CPU_WARNING=1 ALERT_HYSTERESIS_PERCENT=0 MAIL_ENABLED=0 EMAIL_TO= > "$work/empty-recipient.conf"
 PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 0 --once --data-dir empty-recipient \
     --config "$work/empty-recipient.conf"
 grep -Fq ',cpu-2027-01-15T08:00:00+00:00-CRITICAL,,captured,mock' \
