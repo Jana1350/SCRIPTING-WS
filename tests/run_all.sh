@@ -18,7 +18,7 @@ fi
 
 passed=0
 skipped=0
-for suite in test_monitor test_alerts test_cron test_reports test_rotation; do
+for suite in test_monitor test_alerts test_cron test_reports test_rotation test_setup; do
     if [[ $suite != test_monitor && ! -e $tests/$suite.sh ]]; then
         printf 'SKIP: %s.sh unavailable\n' "$suite"
         skipped=$((skipped + 1))
