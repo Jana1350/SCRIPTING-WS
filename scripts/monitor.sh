@@ -25,8 +25,8 @@ parse_args() {
                 [[ ${2-} && $2 != --* ]] || return 2
                 if [[ $1 == --config ]]; then
                     (( config_seen == 0 )) || return 2
+                    [[ ! $2 =~ [[:cntrl:]] ]] || return 2
                     config_seen=1
-                    config_explicit=1
                     config_path=$2
                 else
                     (( data_seen == 0 )) || return 2
@@ -39,81 +39,7 @@ parse_args() {
         esac
     done
     [[ -n $mode ]] || return 2
-    [[ $config_path == /* ]] || config_path=$repo_root/$config_path
     [[ $data_dir == /* ]] || data_dir=$repo_root/$data_dir
-}
-
-read_config() {
-    local path=$1 line key value contents descriptor
-    local -A seen=()
-    [[ -f $path ]] || return 2
-    exec {descriptor}< "$path" || return 4
-    if IFS= read -r -d '' contents <&"$descriptor"; then
-        exec {descriptor}<&-
-        return 2
-    fi
-    exec {descriptor}<&-
-    while IFS= read -r line; do
-        [[ -z $line || $line == \#* ]] && continue
-        [[ $line =~ ^([A-Z_]+)=(.*)$ ]] || return 2
-        key=${BASH_REMATCH[1]}
-        value=${BASH_REMATCH[2]}
-        [[ ${settings[$key]+known} && ! ${seen[$key]+duplicate} ]] || return 2
-        [[ $value != *[[:cntrl:]]* && $value != *['$`;&|<>()']* ]] || return 2
-        seen[$key]=1
-        settings[$key]=$value
-    done <<< "$contents"
-}
-
-load_validate_config() {
-    local key metric warning critical value
-    settings=(
-        [CPU_WARNING]='' [CPU_CRITICAL]='' [MEMORY_WARNING]='' [MEMORY_CRITICAL]=''
-        [DISK_WARNING]='' [DISK_CRITICAL]='' [DISK_MOUNT]='' [CPU_SAMPLE_SECONDS]=''
-        [WATCH_INTERVAL_SECONDS]='' [MAX_DATA_AGE_SECONDS]='' [ALERT_HYSTERESIS_PERCENT]=''
-        [LOG_RETENTION_DAYS]='' [EMAIL_TO]='' [MAIL_ENABLED]='' [REPORT_PDF_ENABLED]=''
-    )
-    read_config "$repo_root/config/defaults.conf" || return "$?"
-    if [[ $config_explicit == 1 || -e $config_path || -L $config_path ]]; then
-        read_config "$config_path" || return "$?"
-        diagnostic "loaded configuration from $config_path"
-    else
-        diagnostic "loaded configuration from $repo_root/config/defaults.conf"
-    fi
-
-    for key in CPU_WARNING CPU_CRITICAL MEMORY_WARNING MEMORY_CRITICAL DISK_WARNING DISK_CRITICAL \
-        CPU_SAMPLE_SECONDS WATCH_INTERVAL_SECONDS MAX_DATA_AGE_SECONDS ALERT_HYSTERESIS_PERCENT \
-        LOG_RETENTION_DAYS MAIL_ENABLED REPORT_PDF_ENABLED; do
-        value=${settings[$key]}
-        # Bound arithmetic to decimal integers that fit safely in Bash.
-        [[ $value =~ ^[0-9]{1,18}$ ]] || return 2
-        settings[$key]=$((10#$value))
-    done
-
-    for metric in CPU MEMORY DISK; do
-        warning=${settings[${metric}_WARNING]}
-        critical=${settings[${metric}_CRITICAL]}
-        (( warning < critical && critical <= 100 &&
-            settings[ALERT_HYSTERESIS_PERCENT] <= warning )) || return 2
-    done
-    (( settings[ALERT_HYSTERESIS_PERCENT] <= 20 &&
-        settings[CPU_SAMPLE_SECONDS] > 0 &&
-        settings[WATCH_INTERVAL_SECONDS] > settings[CPU_SAMPLE_SECONDS] &&
-        settings[MAX_DATA_AGE_SECONDS] >= settings[WATCH_INTERVAL_SECONDS] + settings[CPU_SAMPLE_SECONDS] &&
-        settings[LOG_RETENTION_DAYS] > 0 &&
-        settings[MAIL_ENABLED] <= 1 && settings[REPORT_PDF_ENABLED] <= 1 )) || return 2
-    value=${settings[EMAIL_TO]}
-    if [[ -n $value ]]; then
-        [[ $value =~ ^[a-zA-Z0-9._%+][a-zA-Z0-9._%+-]*@[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$ ]] || return 2
-    else
-        (( settings[MAIL_ENABLED] == 0 )) || return 2
-    fi
-
-    value=${settings[DISK_MOUNT]}
-    [[ -n $value ]] || return 2
-    [[ $value == /* ]] || value=$repo_root/$value
-    [[ -d $value ]] || return 2
-    mount=$(canonical_directory "$value") || return "$?"
 }
 
 canonical_directory() {
@@ -388,8 +314,8 @@ watch_stop() {
 }
 
 uptime_ticks() {
-    local uptime unused
-    read -r uptime unused < /proc/uptime || return 4
+    local uptime _
+    read -r uptime _ < /proc/uptime || return 4
     ticks=$((10#${uptime%.*} * 100 + 10#${uptime#*.}))
 }
 
@@ -418,7 +344,7 @@ watch_loop() {
 monitor_main() {
     export LC_ALL=C
     umask 077
-    local repo_root config_path data_dir mount tool status lock_fd temp_csv='' config_explicit=0
+    local repo_root config_path='' data_dir mount tool status lock_fd temp_csv=''
     local mode='' stopping=0 sleep_pid=''
     local -A settings
     if [[ $# == 1 && $1 == --help ]]; then
@@ -427,8 +353,8 @@ monitor_main() {
     fi
     local script_dir=${BASH_SOURCE[0]%/*}
     [[ $script_dir != "${BASH_SOURCE[0]}" ]] || script_dir=.
-    repo_root=$(canonical_directory "$script_dir/..") || return 4
-    config_path=$repo_root/config/local.conf
+    repo_root=$(canonical_directory "$script_dir/.." && printf '.') || return 4
+    repo_root=${repo_root%$'\n.'}
     data_dir=$repo_root/data
     if ! parse_args "$@"; then
         diagnostic 'invalid arguments'
@@ -442,11 +368,14 @@ monitor_main() {
         fi
     done
     # Validate in the current shell so the merged settings remain available.
-    load_validate_config || {
+    # shellcheck source=scripts/config.sh
+    source "$script_dir/config.sh" || return 7
+    sysguard_config_load "$repo_root" "$config_path" settings || {
         status=$?
         diagnostic "configuration failed (exit $status)"
         return "$status"
     }
+    mount=${settings[DISK_MOUNT]}
     trap cleanup_traps EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM

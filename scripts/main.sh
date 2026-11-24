@@ -13,24 +13,33 @@ require_script() {
     }
 }
 
-run_real_once() (
-    local scripts=$1 config_override=$2 metrics_dir=$3
-    shift 3
+run_once() (
+    local scripts=$1 config_override=$2 metrics_dir=$3 delivery_mode=$4
+    shift 4
     # shellcheck source=scripts/alerts.sh
     source "$scripts/alerts.sh" || exit 7
-    alerts_once "$config_override" "$metrics_dir" real "$scripts/monitor.sh" --once "$@"
+    alerts_once "$config_override" "$metrics_dir" "$delivery_mode" "$scripts/monitor.sh" --once "$@"
 )
 
-show_status() {
-    local repo_root=$1 data_dir=$2 config_path=$3 config_explicit=$4 mount status
-    local -A settings
-    # Reuse the monitor configuration rules without running its entry point.
-    source "$repo_root/scripts/monitor.sh" || return 7
-    load_validate_config || {
+preflight_config() {
+    local repo_root=$1 override=$2 mode=$3 status
+    local -A settings=()
+    # Keep the same shared preflight until the alert loader adopts it.
+    # shellcheck source=scripts/config.sh
+    source "$repo_root/scripts/config.sh" || return 7
+    sysguard_config_load "$repo_root" "$override" settings || {
         status=$?
         printf 'main: configuration failed (exit %d)\n' "$status" >&2
         return "$status"
     }
+    if [[ $mode == real && ${settings[MAIL_ENABLED]} != 1 ]]; then
+        printf 'main: real mail disabled\n' >&2
+        return 2
+    fi
+}
+
+show_status() {
+    local data_dir=$1
     local csv=$data_dir/metrics.csv
     if [[ -e $csv || -L $csv ]]; then
         if [[ ! -f $csv || ! -r $csv || -L $csv ]]; then
@@ -57,7 +66,8 @@ main() {
     if [[ $# == 1 && $1 == --help ]]; then main_usage; return 0; fi
     local script_dir=${BASH_SOURCE[0]%/*} repo_root
     [[ $script_dir != "${BASH_SOURCE[0]}" ]] || script_dir=.
-    repo_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd -P) || return 4
+    repo_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd -P && printf '.') || return 4
+    repo_root=${repo_root%$'\n.'}
     local mode='' period='' config='' data='' mail_mode='' path
     local -a options=()
     while (( $# )); do
@@ -73,6 +83,7 @@ main() {
                 ;;
             --config|--data-dir)
                 [[ ${2-} && $2 != --* ]] || return 2
+                if [[ $1 == --config && $2 =~ [[:cntrl:]] ]]; then return 2; fi
                 path=$2
                 [[ $path == /* ]] || path=$repo_root/$path
                 if [[ $1 == --config ]]; then
@@ -100,18 +111,13 @@ main() {
     case $mode in
         --status)
             require_script "$scripts/monitor.sh" || return 7
-            local explicit=0
-            [[ -z $config ]] || explicit=1
-            show_status "$repo_root" "${data:-$repo_root/data}" "${config:-$repo_root/config/local.conf}" "$explicit"
+            preflight_config "$repo_root" "$config" mock || return "$?"
+            show_status "${data:-$repo_root/data}"
             ;;
         --once)
             require_script "$scripts/monitor.sh" && require_script "$scripts/alerts.sh" || return 7
-            if [[ $mail_mode == real ]]; then
-                run_real_once "$scripts" "$config" "$data" "${options[@]}"
-                return "$?"
-            fi
-            "$scripts/monitor.sh" --once "${options[@]}" || return "$?"
-            "$scripts/alerts.sh" --once "${options[@]}"
+            preflight_config "$repo_root" "$config" "${mail_mode:-mock}" || return "$?"
+            run_once "$scripts" "$config" "$data" "${mail_mode:-mock}" "${options[@]}"
             ;;
         --report)
             require_script "$scripts/report.sh" || return 7
