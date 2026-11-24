@@ -21,7 +21,7 @@ config=$checkout/test.conf
 stdout=$work/stdout
 stderr=$work/stderr
 mkdir -p -- "$checkout/scripts" "$checkout/config" "$work/clock" "$work/faults"
-cp -- "$repo_root/scripts/rotate_logs.sh" "$repo_root/scripts/report.sh" "$checkout/scripts/"
+cp -- "$repo_root/scripts/"{rotate_logs,report,config}.sh "$checkout/scripts/"
 cp -- "$repo_root/config/defaults.conf" "$checkout/config/defaults.conf"
 printf '%s\n' 'REPORT_PDF_ENABLED=0' 'LOG_RETENTION_DAYS=2' > "$config"
 
@@ -123,6 +123,49 @@ expect_status 2 'configuration' bash "$script" --config "$work/invalid.conf"
 assert_absent "$checkout/data"
 assert_absent "$checkout/runtime"
 printf '%s\n' 'PASS: CLI, date validation, and configuration failure leave no output'
+
+# Validate configuration before checking the date or creating default paths.
+rotate_config=(bash "$script" --as-of "$AS_OF" --dry-run)
+mv -- "$checkout/config/defaults.conf" "$work/shared-defaults.conf"
+expect_status 2 'missing default config' "${rotate_config[@]}" --config "$work/shared-defaults.conf"
+mv -- "$work/shared-defaults.conf" "$checkout/config/defaults.conf"
+for invalid in $'CPU_WARNING=20\nALERT_HYSTERESIS_PERCENT=20' \
+    $'CPU_WARNING=0\nALERT_HYSTERESIS_PERCENT=1' 'ALERT_HYSTERESIS_PERCENT=21' \
+    'EMAIL_TO=first..last@example.test' 'REPORT_PDF_ENABLED=00' \
+    'LOG_RETENTION_DAYS=1000000000000000000' 'UNKNOWN_SETTING=1' \
+    $'LOG_RETENTION_DAYS=90\nLOG_RETENTION_DAYS=30' 'REPORT_PDF_ENABLED 0' \
+    $'LOG_RETENTION_DAYS=$(false)'; do
+    printf '%s\n' "$invalid" > "$work/invalid.conf"
+    expect_status 2 'configuration' "${rotate_config[@]}" --config "$work/invalid.conf"
+done
+printf 'LOG_RETENTION_DAYS=90\0\n' > "$work/invalid.conf"
+expect_status 2 'configuration' "${rotate_config[@]}" --config "$work/invalid.conf"
+expect_status 2 'configuration' "${rotate_config[@]}" --config $'test.conf\n'
+if (( EUID != 0 )); then
+    cp -- "$config" "$work/unreadable.conf"
+    chmod 000 -- "$work/unreadable.conf"
+    expect_status 4 'unreadable configuration file' "${rotate_config[@]}" --config "$work/unreadable.conf"
+    chmod 600 -- "$work/unreadable.conf"
+fi
+
+# Defaults and overrides work with a PATH containing only rotation tools.
+mkdir -- "$work/rotation-tools" "$checkout/disk fixture"
+for tool in awk bash cmp date flock gzip mkdir mktemp mv rm rmdir stat sync wc; do
+    ln -s -- "$(command -v "$tool")" "$work/rotation-tools/$tool"
+done
+PATH="$work/rotation-tools" expect_status 0 '' "${rotate_config[@]}"
+assert_contains 'Retention preview: 30 completed days' "$stdout"
+printf '%s\n' LOG_RETENTION_DAYS=25 > "$checkout/config/local.conf"
+expect_status 0 '' "${rotate_config[@]}"
+assert_contains 'Retention preview: 25 completed days' "$stdout"
+printf '%s\n' LOG_RETENTION_DAYS=00090 CPU_WARNING=21 ALERT_HYSTERESIS_PERCENT=20 \
+    REPORT_PDF_ENABLED=1 'DISK_MOUNT=disk fixture/.' > "$checkout/config/rotation override.conf"
+PATH="$work/rotation-tools" expect_status 0 '' "${rotate_config[@]}" --config 'config/rotation override.conf'
+assert_contains 'Retention preview: 90 completed days' "$stdout"
+unlink "$checkout/config/local.conf"
+assert_absent "$checkout/data"
+assert_absent "$checkout/runtime"
+printf '%s\n' 'PASS: shared configuration, override precedence, and rotation without report tools'
 
 new_case empty
 expect_status 0 '' rotate --as-of "$AS_OF"
@@ -309,6 +352,9 @@ expect_status 6 'shared metrics lock' rotate --as-of "$AS_OF" --dry-run
 lock_inode=$(stat -c %i -- "$data/.metrics.lock")
 exec {held}>&-
 before=$(fingerprint "$data")
+printf '%s\n' LOG_RETENTION_DAYS=0 > "$work/invalid.conf"
+expect_status 2 'configuration' bash "$script" --config "$work/invalid.conf" --data-dir "$data" --as-of "$AS_OF"
+[[ $(fingerprint "$data") == "$before" ]] || fail 'invalid configuration changed active data or archives'
 expect_status 0 '' rotate --dry-run
 assert_contains 'before 2026-11-23' "$stdout"
 assert_contains 'Retention preview: 2 completed days retained; dates from 2026-11-16' "$stdout"
