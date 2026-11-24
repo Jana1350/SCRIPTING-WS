@@ -4,6 +4,8 @@
 set -euo pipefail
 root=$(CDPATH='' cd -P -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)
 source "$root/scripts/monitor.sh"
+# shellcheck source=scripts/config.sh
+source "$root/scripts/config.sh"
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 
@@ -112,6 +114,8 @@ for memory_fixture in 'MemTotal: 1000 kB' $'MemTotal: 0 kB\nMemAvailable: 0 kB' 
 done
 memory_fixture=$'MemTotal: 1000 kB\nMemAvailable: 400 kB'
 
+# Deliberately literal config input to test rejection of command substitution.
+# shellcheck disable=SC2016
 for bad_config in 'UNKNOWN=1' $'CPU_WARNING=80\nCPU_WARNING=81' 'CPU_WARNING=95' \
     'WATCH_INTERVAL_SECONDS=1' 'DISK_MOUNT=/missing-sysguard-test-mount' 'DISK_MOUNT=$(false)'; do
     printf '%s\n' "$bad_config" > "$work/config"
@@ -141,6 +145,8 @@ exec {held}>&-
     checkout=$work/lock-checkout
     mkdir -p "$checkout"/{config,data,runtime,custom} "$work/lock-targets"
     cp "$root/config/defaults.conf" "$checkout/config/"
+    # Called by the sourced monitor through expect_status.
+    # shellcheck disable=SC2329
     canonical_directory() {
         case $1 in
             "$root/scripts/..") printf '%s\n' "$checkout" ;;
@@ -192,6 +198,8 @@ exec {held}>&-
     [[ $(stat -c '%d:%i' "$custom_lock") == "$inode" ]] || fail 'replaced regular lock'
     cmp "$work/lock-targets/expected" "$custom_lock" || fail 'truncated regular lock'
     cp "$checkout/custom/metrics.csv" "$work/before-replacement"
+    # Only this isolated lock test moves the clock forward.
+    # shellcheck disable=SC2030
     stamp='2026-11-21T10:00:05+00:00'
     # The descriptor stays open on the original inode while its name changes.
     flock() {
@@ -208,6 +216,8 @@ exec {held}>&-
 )
 printf '%s\n' 'PASS: unsafe default and custom locks, parent paths, persistent inode and descriptor mismatch'
 (
+    # Called indirectly by the sourced monitor.
+    # shellcheck disable=SC2329
     flock() { return 70; }
     expect_status 4 --watch --config "$work/config" --data-dir "$work/data"
 )
@@ -233,6 +243,8 @@ fi
 # Pause a real writer immediately before publication. An independent lock
 # probe uses the same nonblocking protocol a rotator must use.
 (
+    # Called indirectly by the sourced monitor in the background.
+    # shellcheck disable=SC2329
     mv() {
         : > "$work/writer-ready"
         local attempt
@@ -257,7 +269,8 @@ cmp -s "$csv" "$work/expected" || fail 'active file changed before publication'
 wait "$writer" || fail 'concurrent writer failed'
 [[ $rc == 6 ]] || fail "rotator lock probe returned $rc during publication"
 
-# Reverse the roles. Replace the active pathname while holding the same inode.
+# Reverse the roles. Use the parent clock and replace the active pathname.
+# shellcheck disable=SC2031
 printf '%s\n' "$stamp,20.0,60.0,40.0" >> "$work/expected"
 cmp "$csv" "$work/expected" || fail 'published sample incomplete'
 exec {rotator}>>"$work/data/.metrics.lock"
@@ -335,7 +348,7 @@ expect_status 2 --watch --once
 # Exercise orchestration against executables in a temporary checkout.
 suite="$work/project with spaces"
 mkdir -p "$suite/scripts" "$suite/config"
-cp "$root/scripts/"{main,monitor}.sh "$suite/scripts/"
+cp "$root/scripts/"{config,main,monitor}.sh "$suite/scripts/"
 cp "$root/config/defaults.conf" "$suite/config/"
 entry=$suite/scripts/main.sh
 main_exit() {
@@ -367,11 +380,21 @@ name=${0##*/}
 printf '%s\n' "$name" "$@" >> "$CALL_LOG"
 case $name in
     monitor.sh) exit "${MONITOR_RESULT:-0}" ;;
-    alerts.sh) exit "${ALERT_RESULT:-0}" ;;
     report.sh) exit "${REPORT_RESULT:-0}" ;;
 esac
 STUB
-cp "$suite/scripts/monitor.sh" "$suite/scripts/alerts.sh"
+cat > "$suite/scripts/alerts.sh" <<'STUB'
+#!/usr/bin/env bash
+alerts_once() {
+    local data=$2 mode=$3
+    shift 3
+    [[ $mode == mock ]] || return 2
+    "$@" || return "$?"
+    printf '%s\n' alerts.sh --once --data-dir "$data" >> "$CALL_LOG"
+    return "${ALERT_RESULT:-0}"
+}
+STUB
+chmod +x "$suite/scripts/alerts.sh"
 cp "$suite/scripts/monitor.sh" "$suite/scripts/report.sh"
 rc=0
 MONITOR_RESULT=3 "$entry" --once >/dev/null 2>&1 || rc=$?
@@ -449,6 +472,131 @@ seed_alert_data() {
     sample_stamp=$(date -u -d '@1800000000' '+%Y-%m-%dT%H:%M:%S%:z')
     printf '%s\n%s,90.0,40.0,40.0\n' "$expected_header" "$sample_stamp" > "$suite/$1/metrics.csv"
 }
+# Invalid shared configurations must stop before a collector or runtime lock.
+for invalid_config in 'CPU_WARNING=90' 'CPU_WARNING=91' \
+    $'CPU_WARNING=0\nALERT_HYSTERESIS_PERCENT=0' $'MEMORY_WARNING=0\nALERT_HYSTERESIS_PERCENT=0' \
+    $'DISK_WARNING=0\nALERT_HYSTERESIS_PERCENT=0' \
+    $'CPU_WARNING=20\nALERT_HYSTERESIS_PERCENT=20' 'ALERT_HYSTERESIS_PERCENT=21' \
+    'EMAIL_TO=first..last@example.test' $'MAIL_ENABLED=1\nEMAIL_TO=' 'MAIL_ENABLED=1' \
+    'MAIL_ENABLED=00' 'REPORT_PDF_ENABLED=01' 'LOG_RETENTION_DAYS=1000000000000000000' \
+    $'CPU_WARNING=70\nCPU_WARNING=71' 'UNKNOWN=1' $'# comment\r'; do
+    printf '%s\n' "$invalid_config" > "$work/invalid-shared.conf"
+    expect_status 2 --once --config "$work/invalid-shared.conf" --data-dir "$suite/absent-data"
+    main_exit 2 --status --config "$work/invalid-shared.conf"
+    for delivery in mock real; do
+        options=()
+        [[ $delivery != real ]] || options+=(--mail-mode real)
+        : > "$CALL_LOG"
+        PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 2 --once "${options[@]}" \
+            --config "$work/invalid-shared.conf" --data-dir "$suite/absent-data"
+        [[ ! -s $CALL_LOG && ! -e $suite/absent-data && ! -e $suite/runtime &&
+            ! -e $SYSGUARD_MAIL_TEST_CALLS ]] || fail 'invalid configuration caused collection or runtime activity'
+    done
+done
+
+# Leading zeroes are decimal, and 18 digits still fit the supported bound.
+declare -A parsed=()
+mkdir "$suite/disk fixture"
+printf '%s\n' CPU_WARNING=0008 ALERT_HYSTERESIS_PERCENT=0 \
+    LOG_RETENTION_DAYS=999999999999999999 'DISK_MOUNT=disk fixture/.' MAIL_ENABLED=0 EMAIL_TO= \
+    > "$work/shared-valid.conf"
+sysguard_config_load "$suite" "$work/shared-valid.conf" parsed
+[[ ${parsed[CPU_WARNING]} == 8 && ${parsed[LOG_RETENTION_DAYS]} == 999999999999999999 &&
+    ${parsed[DISK_MOUNT]} == "$suite/disk fixture" && ${parsed[MAIL_ENABLED]} == 0 &&
+    -z ${parsed[EMAIL_TO]} ]] || fail 'shared config normalization'
+main_exit 0 --status --config "$work/shared-valid.conf"
+printf '%s\n' CPU_WARNING=20 ALERT_HYSTERESIS_PERCENT=19 > "$work/valid-hysteresis.conf"
+main_exit 0 --status --config "$work/valid-hysteresis.conf"
+printf '%s\n' CPU_WARNING=1 MEMORY_WARNING=1 DISK_WARNING=1 ALERT_HYSTERESIS_PERCENT=0 > "$work/min-warning.conf"
+main_exit 0 --status --config "$work/min-warning.conf"
+
+# Reject output attributes that coerce values, without touching caller data.
+for attributes in Ai Au Al; do
+    (
+        declare "-$attributes" incompatible
+        incompatible[sentinel]=7
+        rc=0
+        sysguard_config_load "$suite" "$work/shared-valid.conf" incompatible || rc=$?
+        [[ $rc == 2 && ${#incompatible[@]} == 1 && ${incompatible[sentinel]} == 7 ]]
+    ) || fail "accepted or modified an output array with -$attributes"
+done
+declare -Ax exported_settings
+sysguard_config_load "$suite" "$work/shared-valid.conf" exported_settings
+[[ ${exported_settings[DISK_MOUNT]} == "$suite/disk fixture" ]] || fail 'exported associative output'
+
+# A real filename with a trailing newline must be rejected as entered.
+unsafe_config=$work/shared-valid.conf$'\n'
+cp "$work/shared-valid.conf" "$unsafe_config"
+expect_status 2 --once --config "$unsafe_config" --data-dir "$suite/absent-data"
+main_exit 2 --status --config "$unsafe_config"
+: > "$CALL_LOG"
+PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 2 --once \
+    --config "$unsafe_config" --data-dir "$suite/absent-data"
+[[ ! -s $CALL_LOG && ! -e $suite/absent-data && ! -e $suite/runtime ]] ||
+    fail 'unsafe config path caused collection or runtime activity'
+
+# Check the loader itself and a relative spelling of the same unsafe path.
+cp "$work/shared-valid.conf" "$suite/relative.conf"$'\n'
+rc=0
+sysguard_config_load "$suite" $'relative.conf\n' parsed || rc=$?
+[[ $rc == 2 && ${parsed[CPU_WARNING]} == 8 ]] || fail 'unsafe relative override or modified output'
+main_exit 2 --status --config $'relative.conf\n'
+
+# Physical mount resolution must preserve and reject a trailing newline.
+mkdir "$suite/mount target"$'\n'
+ln -s $'mount target\n' "$suite/mount-alias"
+printf '%s\n' DISK_MOUNT=mount-alias > "$work/unsafe-mount.conf"
+rc=0
+sysguard_config_load "$suite" "$work/unsafe-mount.conf" parsed || rc=$?
+[[ $rc == 2 && ${parsed[DISK_MOUNT]} == "$suite/disk fixture" ]] || fail 'unsafe physical mount path'
+
+if (( EUID != 0 )); then
+    cp "$work/shared-valid.conf" "$suite/unreadable.conf"
+    chmod 000 "$suite/unreadable.conf"
+    rc=0
+    sysguard_config_load "$suite" unreadable.conf parsed || rc=$?
+    [[ $rc == 4 && ${parsed[CPU_WARNING]} == 8 ]] || fail 'unreadable override or modified output'
+    expect_status 4 --once --config "$suite/unreadable.conf" --data-dir "$suite/absent-data"
+    main_exit 4 --status --config unreadable.conf
+    : > "$CALL_LOG"
+    for delivery in mock real; do
+        options=()
+        [[ $delivery != real ]] || options+=(--mail-mode real)
+        PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 4 --once "${options[@]}" \
+            --config unreadable.conf --data-dir "$suite/absent-data"
+    done
+    [[ ! -s $CALL_LOG && ! -e $suite/absent-data && ! -e $suite/runtime ]] ||
+        fail 'unreadable override caused collection or runtime activity'
+
+    cp "$work/shared-valid.conf" "$suite/config/local.conf"
+    chmod 000 "$suite/config/local.conf"
+    main_exit 4 --status
+    # The selected explicit override takes precedence over the unreadable local file.
+    main_exit 0 --status --config "$work/shared-valid.conf"
+    chmod 600 "$suite/config/local.conf"
+    unlink "$suite/config/local.conf"
+    chmod 600 "$suite/unreadable.conf"
+
+    chmod 000 "$suite/config/defaults.conf"
+    rc=0
+    sysguard_config_load "$suite" "$work/shared-valid.conf" parsed allow-standalone || rc=$?
+    [[ $rc == 4 && ${parsed[CPU_WARNING]} == 8 ]] || fail 'unreadable defaults allowed standalone fallback'
+    chmod 600 "$suite/config/defaults.conf"
+    # An inaccessible config directory must not trigger standalone fallback.
+    chmod 600 "$suite/config"
+    rc=0
+    sysguard_config_load "$suite" "$work/shared-valid.conf" parsed allow-standalone || rc=$?
+    chmod 700 "$suite/config"
+    [[ $rc == 4 && ${parsed[CPU_WARNING]} == 8 ]] || fail 'inaccessible config directory allowed fallback'
+    printf '%s\n' 'PASS: unreadable explicit, implicit and default configuration failures'
+fi
+
+mkdir "$work/standalone"
+sysguard_config_load "$work/standalone" "$suite/config/defaults.conf" parsed allow-standalone
+rc=0
+sysguard_config_load "$work/standalone" "$work/shared-valid.conf" parsed allow-standalone || rc=$?
+[[ $rc == 2 && ${parsed[CPU_WARNING]} == 75 ]] || fail 'standalone validation or preserved output'
+
 printf '%s\n' MAIL_ENABLED=1 EMAIL_TO=ops@example.test > "$suite/config/local.conf"
 printf '%s\n' MAIL_ENABLED=0 > "$work/mail-disabled.conf"
 : > "$CALL_LOG"
@@ -456,6 +604,15 @@ PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 2 --once --data-dir ab
     --mail-mode real --config "$work/mail-disabled.conf"
 [[ ! -s $CALL_LOG && ! -e $suite/absent-mail && ! -e $suite/runtime && ! -e $SYSGUARD_MAIL_TEST_CALLS ]] ||
     fail 'disabled real mail created activity in a fresh checkout'
+printf '%s\n' CPU_WARNING=1 ALERT_HYSTERESIS_PERCENT=0 MAIL_ENABLED=0 EMAIL_TO= > "$work/empty-recipient.conf"
+PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 0 --once --data-dir empty-recipient \
+    --config "$work/empty-recipient.conf"
+grep -Fq ',cpu-2027-01-15T08:00:00+00:00-CRITICAL,,captured,mock' \
+    "$suite/empty-recipient/alerts/delivery.csv" || fail 'mock without a recipient or stable event ID'
+[[ $(wc -l < "$suite/empty-recipient/alerts/delivery.csv") == 3 ]] || fail 'unexpected mock attempt count'
+[[ ! -e $SYSGUARD_MAIL_TEST_CALLS ]] || fail 'mock invoked mailx'
+printf '%s\n' 'PASS: shared validation, side-effect-free rejection and mock without a recipient'
+
 seed_alert_data default-mail
 PATH="$mail_bin:$PATH" main_exit 0 --once --data-dir default-mail
 grep -Fq ',captured,mock' "$suite/default-mail/alerts/delivery.csv" || fail 'default mail mode with mail enabled'
@@ -630,6 +787,8 @@ mkdir -p "$gate/tests/fixtures/v1" "$gate/docs"
 cp "$root/tests/run_all.sh" "$gate/tests/"
 cp "$root/docs/CONTRACTS.md" "$gate/docs/"
 sed 's/74\.9/75.0/' "$root/tests/fixtures/v1/metrics.csv" > "$gate/tests/fixtures/v1/metrics.csv"
+# Keep the variable reference for the generated script to expand.
+# shellcheck disable=SC2016
 printf '%s\n' 'touch "$STARTED"' > "$gate/tests/test_monitor.sh"
 rc=0
 STARTED="$work/started" bash "$gate/tests/run_all.sh" > "$work/gate-log" 2>&1 || rc=$?

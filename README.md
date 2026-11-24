@@ -1,6 +1,25 @@
 # SysGuard
 
-SysGuard samples CPU, memory, and filesystem usage on WSL Ubuntu and records complete measurements in a CSV. Member A owns the Bash monitor, configuration, and orchestration. Member B owns alerts, email, and cron. Member C owns reports, charts, and log rotation. The shared interface in [docs/CONTRACTS.md](docs/CONTRACTS.md) is provisional pending formal team review.
+SysGuard samples CPU, memory, and filesystem usage on WSL Ubuntu and records complete measurements in a CSV. Member A owns the Bash monitor, configuration, and orchestration. Member B owns alerts, email, and cron. Member C owns reports, charts, and log rotation. The shared interface is specified in [docs/CONTRACTS.md](docs/CONTRACTS.md).
+
+## Run SysGuard locally
+
+On Ubuntu or WSL Ubuntu, open a terminal as the Linux user who should own the files and scheduled jobs. A fresh machine needs Git access, Bash, awk, GNU coreutils, Linux procfs, and util-linux flock for local monitoring. The wizard checks the environment. Install the optional scheduling, report, and mail dependencies for the features you intend to use.
+
+```bash
+git clone https://github.com/Jana1350/SCRIPTING-WS.git
+cd SCRIPTING-WS
+bash scripts/setup.sh
+```
+
+Already cloned? Run the last command from your checkout. Press Enter to skip an optional action, including on repeat runs. For a first sample, answer **yes** to the monitoring check. It uses Bash, Linux `/proc`, GNU coreutils, awk and flock. It writes the measurement to `data/metrics.csv` and processes alerts locally in mock mode. Check it with `bash scripts/main.sh --status` and `tail -n 2 data/metrics.csv`.
+
+- **Personal email is optional.** Start with mock delivery, which needs no Gmail credentials. The wizard never configures SMTP or prompts for a password. For Gmail, arrange a working outgoing transport for the same Linux user, for example Ubuntu GNU Mailutils with a sendmail-compatible msmtp setup. Configure authenticated SMTP with TLS in the transport's private settings outside Git. On Ubuntu, the packages for this route are `mailutils`, `msmtp` and `msmtp-mta`. Configure the transport for `smtp.gmail.com` on port 587 with STARTTLS. If your account permits app passwords, enable two-step verification and follow [Google’s app password instructions](https://support.google.com/accounts/answer/185833). Keep the secret in your transport’s protected credential store. The wizard checks mailx subject support, asks before submitting one test, and asks you to confirm inbox receipt before it saves the recipient in the ignored `config/local.conf`. A real scheduled alert also requires explicit real-mail mode. Rerun setup to verify mail when ready.
+- **Change who receives alerts.** The sender is saved once in the Linux user’s mail transport. Rerun `bash scripts/setup.sh`, choose personal email setup, and choose to change the existing recipient. Enter the new inbox and confirm the test message before switching scheduled alerts. To stop email, enter `OFF` at the recipient prompt and confirm. The wizard clears the recipient and switches an existing real schedule to mock before publishing the change. If cron cannot update, the wizard preserves the previous mail settings. If cron switches to mock but saving the settings fails or setup is interrupted, leave the schedule in mock. Rerun setup, select `OFF`, and confirm clearing the recipient. Setup never automatically restores real-mail scheduling.
+- **Schedules with explicit configuration.** If an installed job uses `--config FILE`, the wizard preserves the schedule and skips local recipient changes. An explicit real-mail schedule remains enabled when wizard email setup is skipped. Use the original config to preview and deliberately apply a mock schedule as described in [operations](docs/OPERATIONS.md#cron-preview-and-live-acceptance).
+- **Keep local config private.** A fresh checkout needs no `config/local.conf`. If one exists, it must be an ignored, untracked, owned regular file with one link and mode 0600 or 0400. The config directory must be owned by the current Linux user and permit writes only by that user. For an owned regular file with one link, use `chmod 600 config/local.conf`. Replace symlinks and unsupported files before running setup. If broken config blocks startup, use `bash scripts/setup_cron.sh --uninstall` to remove only SysGuard’s managed jobs.
+- **Scheduling is optional.** Install the Ubuntu cron package and check `systemctl is-active cron` if using systemd. Setup previews the jobs before asking to install them for the current user. On WSL, the distribution and daemon must be running and the laptop awake when a job is due. Inspect `runtime/cron.log` after a scheduled run. Remove only SysGuard's managed block with `bash scripts/setup_cron.sh --uninstall`.
+- **Reporting and rotation schedule.** V1.0 uses UTC for the scheduler, collector, reports, and rotation. The jobs are configured for monitoring every minute, the prior day’s report at 00:10 UTC, the prior Monday–Sunday report on Mondays at 00:20 UTC, and archiving completed days at 00:30 UTC. Reports with samples need gnuplot with pngcairo and a font. PDF output is enabled by default and requires compatible WeasyPrint, file and Poppler utilities. Rotation needs gzip. Use `rotate_logs.sh --dry-run` to preview retention candidates. Old archives are never deleted by rotation. Scheduled commands use `/usr/bin:/bin`. See [report dependencies](docs/REPORTS.md#dependencies) and [deployment evidence](docs/DEPLOYMENT-ACCEPTANCE.md).
 
 ## Run the monitor
 
@@ -49,7 +68,7 @@ These readings describe the Linux environment visible inside WSL. Windows host m
 
 The monitor loads [config/defaults.conf](config/defaults.conf), then applies [config/example.local.conf](config/example.local.conf) only if explicitly selected. Normally the override is the optional, Git-ignored `config/local.conf`. An explicit `--config FILE` selects the override for that invocation. Use trusted, non-executable `KEY=value` files. The parser accepts known keys, rejects duplicates within a file, and does not evaluate shell commands. Keep credentials out of these files and Git.
 
-Defaults use a one-second CPU sample, a 60-second watch interval, and the root mount. Warning/critical defaults are 75/90 for CPU and memory and 80/95 for disk. Each warning must be below its critical threshold, the watch interval must exceed the sampling delay, and the maximum data age must cover their sum. Thresholds are configuration for the alerts consumer. A monitor row contains measurements.
+Defaults use a one-second CPU sample, a 60-second watch interval, and the root mount. Warning/critical defaults are 75/90 for CPU and memory and 80/95 for disk. Each warning must be positive and strictly below its critical threshold, which cannot exceed 100. Hysteresis must be 0–20 and strictly below every warning. Recovery uses a strict comparison below the threshold minus hysteresis. The watch interval must exceed the sampling delay, and the maximum data age must cover their sum. Zero-valued measurements remain valid.
 
 The writer takes an exclusive lock before opening the active CSV. It validates the active history, stages the complete updated file in the destination directory, then publishes it by rename. Sensor, validation, or staging failures preserve the previous CSV. The default data directory uses the persistent `runtime/metrics.lock`. Other canonical data directories use their own `.metrics.lock`. Rotation must use the same lock inode. Atomic publication has been tested. Power-loss durability remains unverified.
 
@@ -79,10 +98,10 @@ Real delivery requires a `mailx` variant that advertises `-s` in its help and a 
 ## Run and interpret tests
 
 ```bash
-tests/test_monitor.sh
-tests/run_all.sh
+bash tests/test_monitor.sh
+bash tests/run_all.sh
 ```
 
-Run the first command for Member A's suite. It uses temporary directories, deterministic sensor inputs, and test-only child executables. The signal checks use Python 3. The second command checks the shared fixture against contract C9 before running available suites. A changed fixture exits before any suite starts. A `SKIP` line identifies an unavailable suite.
+Run the first command for Member A's suite. It uses temporary directories, deterministic sensor inputs, and test-only child executables. The signal checks use Python 3. The second command checks the shared fixture against contract C9 before running all seven required suites. Successful completion prints `Suites: 7 passed, 0 skipped`. A missing suite fails the runner. Report tests require the renderer and PDF inspection dependencies listed above.
 
 Member A's tests use a real advisory lock and a controlled clock to check that watch skips contended samples and publishes a fresh row on schedule after release. They also exercise simulated rotation. Delegation tests verify arguments and exit propagation with temporary stand-ins. Use the full runner's output for the suite results in your checkout.

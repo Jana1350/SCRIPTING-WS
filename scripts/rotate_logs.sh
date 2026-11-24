@@ -31,81 +31,6 @@ parse_args() {
     done
 }
 
-repo_path() {
-    if [[ $1 == /* ]]; then
-        printf '%s\n' "$1"
-    else
-        printf '%s/%s\n' "$repo_root" "$1"
-    fi
-}
-
-read_config() {
-    local path=$1 fd contents line key value
-    local -A seen=()
-    [[ -f $path ]] || return 2
-    exec {fd}< "$path" || return 4
-    # Reading up to NUL lets us reject binary content before parsing it as text.
-    if IFS= read -r -d '' contents <&"$fd"; then
-        exec {fd}<&-
-        return 2
-    fi
-    exec {fd}<&-
-    while IFS= read -r line; do
-        [[ -z $line || $line == \#* ]] && continue
-        [[ $line =~ ^([A-Z_]+)=(.*)$ ]] || return 2
-        key=${BASH_REMATCH[1]}
-        value=${BASH_REMATCH[2]}
-        [[ ${settings[$key]+known} && ! ${seen[$key]+duplicate} ]] || return 2
-        [[ $value != *[[:cntrl:]]* && $value != *['$`;&|<>()']* ]] || return 2
-        seen[$key]=1
-        settings[$key]=$value
-    done <<< "$contents"
-}
-
-load_config() {
-    local override=$1 key value metric warning critical
-    settings=(
-        [CPU_WARNING]='' [CPU_CRITICAL]='' [MEMORY_WARNING]='' [MEMORY_CRITICAL]=''
-        [DISK_WARNING]='' [DISK_CRITICAL]='' [DISK_MOUNT]='' [CPU_SAMPLE_SECONDS]=''
-        [WATCH_INTERVAL_SECONDS]='' [MAX_DATA_AGE_SECONDS]='' [ALERT_HYSTERESIS_PERCENT]=''
-        [LOG_RETENTION_DAYS]='' [EMAIL_TO]='' [MAIL_ENABLED]='' [REPORT_PDF_ENABLED]=''
-    )
-    read_config "$repo_root/config/defaults.conf" || return "$?"
-    if [[ ${options[--config]+set} || -e $override || -L $override ]]; then
-        read_config "$override" || return "$?"
-        diagnostic "loaded defaults and override $override"
-    else
-        diagnostic "loaded $repo_root/config/defaults.conf"
-    fi
-
-    for key in CPU_WARNING CPU_CRITICAL MEMORY_WARNING MEMORY_CRITICAL DISK_WARNING DISK_CRITICAL \
-        CPU_SAMPLE_SECONDS WATCH_INTERVAL_SECONDS MAX_DATA_AGE_SECONDS ALERT_HYSTERESIS_PERCENT \
-        LOG_RETENTION_DAYS MAIL_ENABLED REPORT_PDF_ENABLED; do
-        value=${settings[$key]}
-        [[ $value =~ ^[0-9]{1,18}$ ]] || return 2
-        settings[$key]=$((10#$value))
-    done
-    for metric in CPU MEMORY DISK; do
-        warning=${settings[${metric}_WARNING]}
-        critical=${settings[${metric}_CRITICAL]}
-        (( warning < critical && critical <= 100 && settings[ALERT_HYSTERESIS_PERCENT] <= warning )) || return 2
-    done
-    (( settings[ALERT_HYSTERESIS_PERCENT] <= 20 && settings[CPU_SAMPLE_SECONDS] > 0 &&
-        settings[WATCH_INTERVAL_SECONDS] > settings[CPU_SAMPLE_SECONDS] &&
-        settings[MAX_DATA_AGE_SECONDS] >= settings[WATCH_INTERVAL_SECONDS] + settings[CPU_SAMPLE_SECONDS] &&
-        settings[LOG_RETENTION_DAYS] > 0 && settings[MAIL_ENABLED] <= 1 && settings[REPORT_PDF_ENABLED] <= 1 )) || return 2
-
-    value=${settings[EMAIL_TO]}
-    if [[ -n $value ]]; then
-        [[ $value =~ ^[a-zA-Z0-9._%+][a-zA-Z0-9._%+-]*@[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$ ]] || return 2
-    else
-        (( settings[MAIL_ENABLED] == 0 )) || return 2
-    fi
-    value=${settings[DISK_MOUNT]}
-    [[ -n $value ]] || return 2
-    value=$(repo_path "$value")
-    [[ -d $value && -x $value ]] || return 2
-}
 calendar_date() {
     [[ $1 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && $1 != 0000-* ]] || return 3
     [[ $(date -u -d "$1" +%F 2>/dev/null) == "$1" ]]
@@ -363,13 +288,13 @@ main() {
 
     local -A options=() settings=() counts=()
     local -a days=()
-    local tool script_dir repo_root config data_dir archive_dir active today as_of status lock_fd dry_run=0
+    local tool script_dir repo_root data_dir archive_dir active today as_of status lock_fd dry_run=0
     if ! parse_args "$@"; then
         diagnostic 'invalid arguments'
         usage >&2
         return 2
     fi
-    for tool in awk cmp date flock gzip mkdir mktemp mv rm rmdir sync wc; do
+    for tool in awk cmp date flock gzip mkdir mktemp mv rm rmdir stat sync wc; do
         if ! command -v "$tool" >/dev/null; then
             diagnostic "required command unavailable: $tool"
             return 7
@@ -377,9 +302,14 @@ main() {
     done
     script_dir=${BASH_SOURCE[0]%/*}
     [[ $script_dir != "${BASH_SOURCE[0]}" ]] || script_dir=.
-    repo_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd -P) || return 4
-    config=$(repo_path "${options[--config]:-config/local.conf}")
-    load_config "$config" || {
+    repo_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd -P && printf '.') || return 4
+    repo_root=${repo_root%$'\n.'}
+    # shellcheck source=scripts/config.sh
+    source "$script_dir/config.sh" || {
+        diagnostic 'shared configuration loader unavailable'
+        return 7
+    }
+    sysguard_config_load "$repo_root" "${options[--config]-}" settings || {
         status=$?
         diagnostic 'configuration could not be loaded or validated'
         return "$status"

@@ -6,7 +6,7 @@ Member C owns the daily and weekly reports, gnuplot charts, PDF generation, and 
 
 | Use | Commands |
 |---|---|
-| Reports and rotation | Bash with associative arrays, `awk`, GNU `date` and coreutils, `gzip`, and Linux `flock` |
+| Reports and rotation | Bash with associative arrays, `awk`, GNU `date` and coreutils (including `stat`), Linux procfs and `flock`, and `gzip` |
 | Charts | `gnuplot` with the `pngcairo` terminal and a usable font |
 | PDF generation and its runtime checks | WeasyPrint with `--allowed-protocols` support, `file`, `pdfinfo`, `pdfimages`, `grep`, `ln`, and `tail` |
 | Rotation verification and flushing | `gzip -t`, `cmp`, `wc`, and GNU `sync` with file and directory arguments |
@@ -32,7 +32,7 @@ scripts/report.sh weekly
 scripts/rotate_logs.sh --dry-run
 ```
 
-Both scripts resolve relative CLI paths against the repository root. They read `config/defaults.conf` first, then the selected `--config FILE` or the optional `config/local.conf`. The parser accepts known `KEY=value` settings, rejects duplicate keys within a file, and validates the merged configuration before generating output. The relevant settings in the tracked defaults are:
+Both scripts resolve relative CLI paths against the repository root. The shared `scripts/config.sh` loader requires `config/defaults.conf`. It applies an explicit `--config FILE` override when supplied or the optional `config/local.conf` otherwise. It validates the literal `KEY=value` schema, including path safety and threshold and hysteresis boundaries, before date selection or filesystem writes. See [C3](CONTRACTS.md#c3-configuration-schema-v1) for the full validation rules and exit codes. The relevant settings in the tracked defaults are:
 
 | Setting | Default | Effect |
 |---|---:|---|
@@ -40,7 +40,7 @@ Both scripts resolve relative CLI paths against the repository root. They read `
 | `WATCH_INTERVAL_SECONDS` | `60` | Report coverage counts gaps between valid samples that exceed this interval. |
 | `LOG_RETENTION_DAYS` | `30` | Sets the age threshold for the retention preview. |
 
-`TZ` sets the reporting and rotation timezone, with the system timezone as fallback. For a scheduled deployment, confirm the same timezone for the collector, reports, rotation, and the scheduler. CSV timestamps carry their own offsets and are converted to absolute instants before comparison. The commands use the C locale for numeric parsing.
+`TZ` sets the reporting and rotation timezone, with the system timezone as fallback. SysGuard V1.0 uses UTC for deployment. Verify UTC for the collector, reports, rotation, and the scheduler. CSV timestamps carry their own offsets and are converted to absolute instants before comparison. The commands use the C locale for numeric parsing.
 
 ## Data and locks
 
@@ -75,7 +75,7 @@ The monitor and rotator acquire an exclusive `flock` before opening the active C
 - `awk` calculates count, minimum, maximum, and arithmetic mean for each metric using validated in-window samples. The mean is the sum of values divided by the sample count. The implementation accumulates integer tenths before formatting min and max to one decimal and mean to two. A valid empty window shows **NO DATA**, a count of zero, and `N/A` statistics.
 - HTML and PDF show the elapsed time from the inclusive start to the first valid sample and from the last valid sample to the exclusive end. An empty window shows its full unobserved duration. These values describe sample timing. A coverage percentage would require an agreed sampling tolerance.
 
-The reporter feeds validated epochs and numeric percentages to gnuplot to create a PNG with three panels for CPU, memory, and disk. The time axis shows UTC offsets. Plot lines break across gaps longer than the configured watch interval. HTML contains the reporting window, timezone, coverage, statistics, warnings, and a chart link. When PDF is enabled, WeasyPrint renders staged HTML using local chart assets. `file` and `pdfinfo` check the output format and readable pages. `pdfimages` checks for the actual embedded chart when samples exist.
+The reporter feeds validated epochs and numeric percentages to gnuplot to create a PNG with three panels for CPU, memory, and disk. The time axis shows UTC offsets. Plot lines break across gaps longer than the configured watch interval. HTML contains the reporting window, timezone, coverage, statistics, warnings, and a chart link. HTML, PDF, and chart files are local artifacts. When PDF is enabled, WeasyPrint renders staged HTML using local chart assets. `file` and `pdfinfo` check the output format and readable pages. `pdfimages` checks for the actual embedded chart when samples exist.
 
 ## Publication, rotation, and recovery
 
@@ -96,13 +96,13 @@ Run this block from the repository root on or after November 21, 2026. It copies
 ```bash
 (
   set -euo pipefail
-  export LC_ALL=C TZ=Asia/Kolkata
+  export LC_ALL=C TZ=Etc/UTC
   root=$(git rev-parse --show-toplevel)
   demo=$(mktemp -d /tmp/sysguard-reports-demo.XXXXXXXX)
   printf 'Fixture artifacts: %s\n' "$demo"
   export XDG_CACHE_HOME="$demo/cache"
   mkdir -p "$demo/project/scripts" "$demo/project/config" "$demo/data"
-  cp "$root/scripts/report.sh" "$root/scripts/rotate_logs.sh" "$demo/project/scripts/"
+  cp "$root/scripts/"{report,rotate_logs,config}.sh "$demo/project/scripts/"
   cp "$root/config/defaults.conf" "$demo/project/config/"
   cp "$root/tests/fixtures/v1/metrics.csv" "$demo/data/metrics.csv"
   printf '%s\n' 'REPORT_PDF_ENABLED=1' > "$demo/pdf.conf"
@@ -160,7 +160,7 @@ The Phase 6 fixture run confirmed the figures above, matching HTML and PNGs, and
   set -e
   for script in scripts/report.sh scripts/rotate_logs.sh tests/test_reports.sh tests/test_rotation.sh; do
     bash -n "$script"
-    shellcheck "$script"
+    shellcheck -x "$script"
   done
   bash tests/test_reports.sh
   bash tests/test_rotation.sh
@@ -176,7 +176,7 @@ The report suite covers the periods, offsets, CSV errors, charts, PDF content an
 | `0` | Success, including a valid no-data report or a rotation with no eligible rows. |
 | `2` | Invalid CLI usage or configuration. |
 | `3` | Invalid date or input, including conflicting archive data or corrupt gzip. |
-| `4` | Filesystem, rendering, PDF validation, or publication failure. |
+| `4` | Unreadable configuration, filesystem, rendering, PDF validation, or publication failure. |
 | `6` | Report or metrics lock is busy. |
 | `7` | A required command is unavailable for this run. |
 
@@ -184,17 +184,17 @@ Failures are reported on stderr. Before retrying, check the first diagnostic and
 
 ## Integration handoff and release checks
 
-- **A, monitoring and orchestration.** The locally cached `origin/feature/monitoring` ref at `8c1199c` contains `monitor.sh` and `main.sh`. Its producer header, one-decimal values, numeric timestamp offsets, and default and override lock paths match C's supported paths. The monitor acquires the lock before opening the active CSV. `main.sh --report daily|weekly` forwards `--config` and `--data-dir`. For `--date` or `--output-dir`, invoke C's `report.sh` directly. A's code is outside the Member C branch at this review.
-- **A, verified delegation and follow-up.** An isolated test of the cached `main.sh` used its absolute path to generate a daily report with six fixture samples and exited `0`. A relative invocation with `CDPATH=.` exited `7` because path discovery captured extra text from `cd`. A owns the corresponding path fix. Use the absolute path for scheduled calls.
-- **B, scheduling and alerts.** The current branch and local refs lack `setup_cron.sh` and `alerts.sh`. Verify the schedule preview once available. Use absolute job paths, a consistent timezone, and a `PATH` that includes the configured reporting dependencies. B needs to verify its latest-row read and missing or header-only handling while the monitor and rotator use the shared lock.
-- **Integration still to run.** Verify the first monitor append after rotation leaves a header-only active file. Observed WSL sampling and scheduled execution, live alert delivery, and a clean merged release rehearsal require team review. Retention remains preview-only.
+- **Integrated interfaces.** Reports and rotation use the shared configuration loader from C3 and the monitor's metrics lock. `main.sh --report daily` and `main.sh --report weekly` forward `--config` and `--data-dir`. Call `report.sh` directly for `--date` or `--output-dir`.
+- **Automated fixtures.** The report and rotation suites check the shared config at each CLI, report output, archive contents, and failure recovery in temporary checkouts.
+- **Controlled renderer acceptance.** In UTC, gnuplot 6.0 patchlevel 2 and WeasyPrint 67.0 rendered a daily report from one genuine isolated monitor sample. A separate synthetic history produced daily and weekly reports with three and six samples. Both periods retained the same statistics, charts, and extracted PDF text after gzip rotation. The no-data report contained no chart. These runs used temporary data and local renderers.
+- **Scheduled deployment acceptance.** Daily reports at 00:10 UTC, weekly reports on Mondays at 00:20 UTC, and archive creation at 00:30 UTC are pending actual cron evidence. Pair daemon dispatch records with completed outputs or an eligible archive and verify that the monitor continues appending. A fixture run or a scheduler preview does not establish daemon-triggered execution.
 
 ### Pull-request checklist
 
 - [ ] Review Member C's diff against the current shared baseline and confirm the owned-file scope.
 - [ ] Attach the executed test commands, exit statuses, and redacted fixture results.
 - [ ] Verify the diff excludes generated reports, archives, runtime files, and local configuration.
-- [ ] Record pending scheduler and alert checks, and obtain team review before merge.
+- [ ] Record pending scheduled reporting and rotation checks, and obtain team review before merge.
 
 ### Demo checklist
 
