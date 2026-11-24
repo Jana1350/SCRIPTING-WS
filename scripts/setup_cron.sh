@@ -28,8 +28,10 @@ if [[ ${BASH_SOURCE[0]} != "$0" ]]; then return 0; fi
 set -Eeuo pipefail
 export LC_ALL=C
 umask 077
+script_dir=${BASH_SOURCE[0]%/*}
+[[ $script_dir != "${BASH_SOURCE[0]}" ]] || script_dir=.
 # shellcheck source=scripts/alerts.sh
-source "$(dirname -- "${BASH_SOURCE[0]}")/alerts.sh"
+source "$script_dir/alerts.sh"
 trap 'die 4 "cron setup failed at line $LINENO"' ERR
 repo_root
 action='' config=''
@@ -40,11 +42,18 @@ while (($#)); do
     case $1 in
         --help)
             printf '%s\n' 'setup_cron.sh [--print|--install] [--config FILE] [--mail-mode real]' \
-                'setup_cron.sh --uninstall'
+                'setup_cron.sh --uninstall [--config FILE]' \
+                'Uninstall accepts --config for compatibility and skips configuration loading.'
             exit 0
             ;;
         --print|--install|--uninstall) [[ -z $action ]] || die 2 "choose one action"; action=$1;;
-        --config) [[ -n ${2-} && $2 != --* ]] || die 2 "missing config"; config=$(absolute "$2"); shift;;
+        --config)
+            [[ -n ${2-} && $2 != --* ]] || die 2 "missing config"
+            [[ $2 != *%* && ! $2 =~ [[:cntrl:]] ]] || die 2 "path unsafe for cron"
+            config=$2
+            [[ $config == /* ]] || config=$root/$config
+            shift
+            ;;
         --mail-mode)
             [[ ${2-} == real && -z $mail_mode ]] || die 2 "expected a single --mail-mode real"
             mail_mode=real
@@ -84,6 +93,7 @@ render() {
 }
 if [[ $action != --uninstall ]]; then
     [[ $root$config != *%* && ! $root$config =~ [[:cntrl:]] ]] || die 2 "path unsafe for cron"
+    if [[ $mail_mode == real ]]; then require_default_config; fi
     if [[ $action == --install || -n $mail_mode || -n $config || -e $root/config/defaults.conf ]]; then
         load_config "$config"
     fi

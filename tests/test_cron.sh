@@ -8,6 +8,7 @@ export FAKE_TABLE="$temp/table"
 cat > "$temp/bin/crontab" <<'FAKE'
 #!/usr/bin/env bash
 set -eu
+printf '%s\n' "$1" >> "$FAKE_TABLE.calls"
 if [[ $1 == -l ]]; then
     if [[ -e $FAKE_TABLE.error ]]; then echo "read failure" >&2; exit 1; fi
     if [[ ! -f $FAKE_TABLE ]]; then echo "no crontab for $(id -un)" >&2; exit 1; fi
@@ -100,7 +101,9 @@ cp "$FAKE_TABLE" "$temp/installed"
 expect 0 "$cron" --install
 cmp "$FAKE_TABLE" "$temp/installed"
 [[ $(wc -l < "$FAKE_TABLE.writes") == 1 ]]
-expect 0 "$cron" --uninstall
+expect 0 "$cron" --help
+grep -Fq 'setup_cron.sh --uninstall [--config FILE]' "$temp/stdout"
+expect 0 "$cron" --uninstall --config 'config/missing uninstall.conf'
 diff -u <(printf '%s\n' "$before" "$after") "$FAKE_TABLE"
 expect 0 "$cron" --uninstall
 [[ $(wc -l < "$FAKE_TABLE.writes") == 2 ]]
@@ -131,7 +134,7 @@ mv -- "$repo/data" "$temp/prior-data"
 cat > "$repo/scripts/monitor.sh" <<'COLLECT'
 #!/usr/bin/env bash
 set -eu
-[[ $# == 1 && $1 == --once ]] || exit 2
+[[ ${1-} == --once && ( $# == 1 || ( $# == 3 && $2 == --config && -f $3 ) ) ]] || exit 2
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 exec 9>>"$root/runtime/metrics.lock"
 flock -xn -E 6 9
@@ -150,17 +153,88 @@ fi
 cat > "$SYSGUARD_CRON_TEST_CAPTURE"
 STUB
 chmod +x -- "$repo/scripts/monitor.sh" "$temp/bin/mailx"
-real_command=$(sed -n '2p' "$temp/real-preview" | cut -d' ' -f6-)
-[[ $real_command == *'PATH=/usr/bin:/bin '* ]]
-# shellcheck disable=SC2016
-fixture_command=${real_command/'PATH=/usr/bin:/bin'/'PATH="$SYSGUARD_CRON_TEST_BIN:/usr/bin:/bin"'}
-[[ $fixture_command != "$real_command" && $(command -v mailx) == "$temp/bin/mailx" ]]
-expect 0 /bin/sh -c "$fixture_command"
+run_real_job() {
+    local real_command fixture_command
+    real_command=$(sed -n '2p' "$1" | cut -d' ' -f6-)
+    [[ $real_command == *'PATH=/usr/bin:/bin '* ]] || return 1
+    # shellcheck disable=SC2016
+    fixture_command=${real_command/'PATH=/usr/bin:/bin'/'PATH="$SYSGUARD_CRON_TEST_BIN:/usr/bin:/bin"'}
+    [[ $fixture_command != "$real_command" && $(command -v mailx) == "$temp/bin/mailx" ]] || return 1
+    /bin/sh -c "$fixture_command"
+}
+expect 0 run_real_job "$temp/real-preview"
 grep -Fq ',submitted,mailx_exit_zero' "$repo/data/alerts/delivery.csv"
 grep -Fq '90.0%' "$SYSGUARD_CRON_TEST_CAPTURE"
+
+# A complete explicit config still needs the checkout's defaults in real mode.
+complete_config=$repo/config/complete.conf
+sed 's/^MAIL_ENABLED=0$/MAIL_ENABLED=1/' "$repo/config/defaults.conf" > "$complete_config"
+expect 0 "$cron" --print --mail-mode real --config "$complete_config"
+cp "$temp/stdout" "$temp/explicit-real-preview"
+cp "$FAKE_TABLE" "$temp/defaults-test-table"
+cp "$FAKE_TABLE.calls" "$temp/defaults-test-calls"
+mv -- "$repo/config/defaults.conf" "$temp/saved-defaults.conf"
+for action in --print --install; do
+    expect 2 "$cron" "$action" --mail-mode real --config "$complete_config"
+    [[ ! -s $temp/stdout ]]
+    grep -Fq 'missing default config' "$temp/stderr"
+    cmp "$FAKE_TABLE" "$temp/defaults-test-table"
+    cmp "$FAKE_TABLE.calls" "$temp/defaults-test-calls"
+done
+expect 2 run_real_job "$temp/explicit-real-preview"
+grep -Fq 'missing default config' "$repo/runtime/cron.log"
+mv -- "$temp/saved-defaults.conf" "$repo/config/defaults.conf"
+expect 0 "$cron" --print --mail-mode real --config "$complete_config"
+cmp "$temp/stdout" "$temp/explicit-real-preview"
+expect 0 "$cron" --install --mail-mode real --config "$complete_config"
+diff -u <(printf '%s\n' "$before" "$after"; cat "$temp/explicit-real-preview") "$FAKE_TABLE"
+mv -- "$repo/data" "$temp/data-before-defaults-test"
+expect 0 run_real_job "$temp/explicit-real-preview"
+grep -Fq ',submitted,mailx_exit_zero' "$repo/data/alerts/delivery.csv"
+echo 'PASS real cron preview, install and scheduled command require defaults with an explicit config'
+
 expect 0 "$cron" --uninstall
 diff -u <(printf '%s\n' "$before" "$after") "$FAKE_TABLE"
 echo 'PASS cron real-mail opt-in, fake installation idempotence and fixture mail capture'
+
+# Use a valid file so stripping a suffix would allow the command to proceed.
+relative_config='config/valid cron.conf'
+absolute_config=$repo/$relative_config
+printf '%s\n' MAIL_ENABLED=1 > "$absolute_config"
+expect 0 "$cron" --print --config "$relative_config"
+cp "$temp/stdout" "$temp/relative-config-preview"
+expect 0 "$cron" --print --config "$absolute_config"
+cmp "$temp/stdout" "$temp/relative-config-preview"
+[[ $(grep -Fc -- "/$relative_config'" "$temp/stdout") == 4 ]]
+cp "$FAKE_TABLE" "$temp/path-test-table"
+cp "$FAKE_TABLE.calls" "$temp/path-test-calls"
+for bad_config in "$absolute_config"$'\n' "$relative_config"$'\n\n' \
+    "$repo/config/valid"$'\n'' cron.conf' "$absolute_config"$'\r' \
+    "$absolute_config"$'\t' "$absolute_config%"; do
+    for action in --print --install; do
+        expect 2 "$cron" "$action" --config "$bad_config"
+        [[ ! -s $temp/stdout ]]
+        grep -Fq 'path unsafe for cron' "$temp/stderr"
+        cmp "$FAKE_TABLE" "$temp/path-test-table"
+        cmp "$FAKE_TABLE.calls" "$temp/path-test-calls"
+    done
+done
+echo 'PASS cron validates raw config paths before rendering or accessing crontab'
+
+# Make the path left by newline stripping a real checkout as well.
+cp -a -- "$repo" "$temp/root-checkout"
+for suffix in $'\n' $'\n\n' $'\nembedded' $'\r' $'\t' '%'; do
+    unsafe_repo=$temp/root-checkout$suffix
+    cp -a -- "$temp/root-checkout" "$unsafe_repo"
+    for action in --print --install; do
+        expect 2 "$unsafe_repo/scripts/setup_cron.sh" "$action"
+        [[ ! -s $temp/stdout ]]
+        grep -Fq 'path unsafe for cron' "$temp/stderr"
+        cmp "$FAKE_TABLE" "$temp/path-test-table"
+        cmp "$FAKE_TABLE.calls" "$temp/path-test-calls"
+    done
+done
+echo 'PASS cron rejects unsafe checkout roots before rendering or accessing crontab'
 
 for malformed in begin end duplicate; do
     case $malformed in

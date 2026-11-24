@@ -3,9 +3,12 @@
 die() { printf 'sysguard: %s\n' "$2" >&2; exit "$1"; }
 absolute() { case $1 in /*) printf '%s\n' "$1";; *) printf '%s/%s\n' "$root" "$1";; esac; }
 repo_root() {
-    local dir
-    dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || die 4 "script directory"
-    root=$(git -C "$dir" rev-parse --show-toplevel) || die 7 "Git checkout required"
+    local dir=${BASH_SOURCE[0]%/*}
+    [[ $dir != "${BASH_SOURCE[0]}" ]] || dir=.
+    [[ -d $dir ]] || die 4 "script directory"
+    # Keep trailing newlines in the path. Remove only Git's terminator and the sentinel.
+    root=$(git -C "$dir" rev-parse --show-toplevel && printf '.') || die 7 "Git checkout required"
+    root=${root%$'\n.'}
 }
 read_config() {
     local file=$1 line key value
@@ -21,21 +24,29 @@ read_config() {
             *) die 2 "unknown config key";;
         esac
         [[ ! ${seen[$key]+x} && ! $value =~ [[:cntrl:]] ]] || die 2 "duplicate key or control character"
+        [[ $value != *['$`;&|<>()']* ]] || die 2 "invalid config value"
         seen[$key]=1
         cfg[$key]=$value
     done < "$file"
     printf 'sysguard: loaded %s\n' "$file" >&2
 }
+require_default_config() {
+    [[ -f $root/config/defaults.conf ]] || die 2 "missing default config"
+}
 load_config() {
-    local key metric w c
-    if [[ -n $1 ]]; then
-        if [[ -f $root/config/defaults.conf && $(absolute "$1") != "$root/config/defaults.conf" ]]; then
+    local file=$1 key metric w c
+    if [[ -n $file ]]; then
+        [[ $file == /* ]] || file=$root/$file
+        [[ ! $file =~ [[:cntrl:]] ]] || die 2 "invalid config path"
+        if [[ -f $root/config/defaults.conf && $file != "$root/config/defaults.conf" ]]; then
             read_config "$root/config/defaults.conf"
         fi
-        read_config "$(absolute "$1")"
+        read_config "$file"
     else
         read_config "$root/config/defaults.conf"
-        if [[ -e $root/config/local.conf ]]; then read_config "$root/config/local.conf"; fi
+        if [[ -e $root/config/local.conf || -L $root/config/local.conf ]]; then
+            read_config "$root/config/local.conf"
+        fi
     fi
     for key in CPU_WARNING CPU_CRITICAL MEMORY_WARNING MEMORY_CRITICAL DISK_WARNING DISK_CRITICAL ALERT_HYSTERESIS_PERCENT CPU_SAMPLE_SECONDS WATCH_INTERVAL_SECONDS MAX_DATA_AGE_SECONDS LOG_RETENTION_DAYS; do
         [[ ${cfg[$key]-} =~ ^[0-9]{1,9}$ ]] || die 2 "invalid $key"
@@ -51,7 +62,9 @@ load_config() {
        cfg[LOG_RETENTION_DAYS] > 0 )) || die 2 "invalid intervals"
     [[ ${cfg[MAIL_ENABLED]-} =~ ^[01]$ && ${cfg[REPORT_PDF_ENABLED]-} =~ ^[01]$ ]] || die 2 "invalid boolean"
     [[ ${cfg[DISK_MOUNT]-} =~ ^/[[:alnum:]_./[:blank:]-]*$ && -d ${cfg[DISK_MOUNT]} && -x ${cfg[DISK_MOUNT]} ]] || die 2 "invalid disk mount"
-    local address='^[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+    local local_part='[A-Za-z0-9][A-Za-z0-9_+-]*(\.[A-Za-z0-9_+-]+)*'
+    local domain='[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+'
+    local address="^${local_part}@${domain}$"
     [[ ${cfg[EMAIL_TO]+x} ]] || die 2 "missing EMAIL_TO"
     if [[ -n ${cfg[EMAIL_TO]} || ${cfg[MAIL_ENABLED]} == 1 ]]; then
         [[ ${cfg[EMAIL_TO]} =~ $address ]] || die 2 "invalid recipient"
@@ -202,13 +215,7 @@ acquire_lock() {
     die 4 "flock failed: $path"
 }
 alerts_main() {
-    set -Eeuo pipefail
-    trap 'die 4 "filesystem or command failure at line $LINENO"' ERR
-    export LC_ALL=C
-    umask 077
-    local root config='' data='' mode=mock once=0
-    local -A cfg=()
-    repo_root
+    local config='' data='' mode=mock once=0
     while (($#)); do
         case $1 in
             --help) echo 'alerts.sh --once [--config FILE] [--data-dir DIR] [--mail-mode mock|real|disabled]'; return;;
@@ -222,8 +229,28 @@ alerts_main() {
         shift
     done
     [[ $once == 1 && $mode =~ ^(mock|real|disabled)$ ]] || die 2 "invalid action or mail mode"
+    alerts_once "$config" "$data" "$mode"
+}
+
+# With an optional collector command, validate once and keep these settings for delivery.
+alerts_once() (
+    set -Eeuo pipefail
+    trap 'die 4 "filesystem or command failure at line $LINENO"' ERR
+    export LC_ALL=C
+    umask 077
+    local root config=$1 data=$2 mode=$3
+    shift 3
+    local -A cfg=()
+    repo_root
+    if (($#)); then
+        # The monitor always requires tracked defaults, even with an explicit override.
+        require_default_config
+    fi
     load_config "$config"
     [[ $mode != real || ${cfg[MAIL_ENABLED]} == 1 ]] || die 2 "real mail disabled"
+    if (($#)); then
+        "$@" || exit "$?"
+    fi
     command -v flock >/dev/null || die 7 "flock missing"
     data=$(safe_directory "$(absolute "${data:-data}")")
     local runtime out held_fd metrics_lock
@@ -270,5 +297,5 @@ alerts_main() {
         deliver "${metrics[i]}" "${previous[i]:-NORMAL}" "${levels[i]}" "${values[i]}" "${thresholds[i]}"
     done
     (( result == 0 )) || die "$result" "delivery failed; see delivery.csv"
-}
+)
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then alerts_main "$@"; fi

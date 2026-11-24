@@ -13,6 +13,14 @@ require_script() {
     }
 }
 
+run_real_once() (
+    local scripts=$1 config_override=$2 metrics_dir=$3
+    shift 3
+    # shellcheck source=scripts/alerts.sh
+    source "$scripts/alerts.sh" || exit 7
+    alerts_once "$config_override" "$metrics_dir" real "$scripts/monitor.sh" --once "$@"
+)
+
 show_status() {
     local repo_root=$1 data_dir=$2 config_path=$3 config_explicit=$4 mount status
     local -A settings
@@ -50,8 +58,8 @@ main() {
     local script_dir=${BASH_SOURCE[0]%/*} repo_root
     [[ $script_dir != "${BASH_SOURCE[0]}" ]] || script_dir=.
     repo_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd -P) || return 4
-    local mode='' period='' config='' data='' path
-    local -a options=() alert_options=()
+    local mode='' period='' config='' data='' mail_mode='' path
+    local -a options=()
     while (( $# )); do
         case $1 in
             --once|--status|--report)
@@ -78,15 +86,15 @@ main() {
                 shift
                 ;;
             --mail-mode)
-                [[ ${2-} == real && ${#alert_options[@]} == 0 ]] || return 2
-                alert_options=(--mail-mode real)
+                [[ ${2-} == real && -z $mail_mode ]] || return 2
+                mail_mode=real
                 shift
                 ;;
             *) return 2 ;;
         esac
         shift
     done
-    [[ $mode == --once || ${#alert_options[@]} == 0 ]] || return 2
+    [[ $mode == --once || -z $mail_mode ]] || return 2
 
     local scripts=$repo_root/scripts
     case $mode in
@@ -98,8 +106,12 @@ main() {
             ;;
         --once)
             require_script "$scripts/monitor.sh" && require_script "$scripts/alerts.sh" || return 7
+            if [[ $mail_mode == real ]]; then
+                run_real_once "$scripts" "$config" "$data" "${options[@]}"
+                return "$?"
+            fi
             "$scripts/monitor.sh" --once "${options[@]}" || return "$?"
-            "$scripts/alerts.sh" --once "${options[@]}" "${alert_options[@]}"
+            "$scripts/alerts.sh" --once "${options[@]}"
             ;;
         --report)
             require_script "$scripts/report.sh" || return 7
