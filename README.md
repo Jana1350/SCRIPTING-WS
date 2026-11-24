@@ -2,6 +2,23 @@
 
 SysGuard samples CPU, memory, and filesystem usage on WSL Ubuntu and records complete measurements in a CSV. Member A owns the Bash monitor, configuration, and orchestration. Member B owns alerts, email, and cron. Member C owns reports, charts, and log rotation. The shared interface in [docs/CONTRACTS.md](docs/CONTRACTS.md) is provisional pending formal team review.
 
+## Run SysGuard locally
+
+On Ubuntu or WSL Ubuntu, open a terminal as the Linux user who should own the files and scheduled jobs. You need Git access to clone the project. Setup runs on your machine and requires no device registration.
+
+```bash
+git clone https://github.com/Jana1350/SCRIPTING-WS.git
+cd SCRIPTING-WS
+bash scripts/setup.sh
+```
+
+Already cloned? Run the last command from your checkout. Press Enter to skip an optional action, including on repeat runs. For a first sample, answer **yes** to the monitoring check. It uses Bash, Linux `/proc`, GNU coreutils, awk and flock. It writes the measurement to `data/metrics.csv` and processes alerts locally in mock mode. Check it with `bash scripts/main.sh --status` and `tail -n 2 data/metrics.csv`.
+
+- **Personal email is optional.** Start with mock delivery. For Gmail, arrange a working outgoing transport for the same Linux user, for example Ubuntu GNU Mailutils with a sendmail-compatible msmtp setup. Configure authenticated SMTP with TLS in the transport's private settings outside Git. On Ubuntu, the packages for this route are `mailutils`, `msmtp` and `msmtp-mta`. Configure the transport for `smtp.gmail.com` on port 587 with STARTTLS. If your account permits app passwords, enable two-step verification and follow [Google’s app password instructions](https://support.google.com/accounts/answer/185833). Keep the secret in your transport’s protected credential store. The wizard checks mailx subject support, asks before submitting one test, and asks you to confirm inbox receipt before it saves the recipient in the ignored `config/local.conf`. A real scheduled alert also requires explicit real-mail mode. Rerun setup to verify mail when ready.
+- **Change who receives alerts.** The sender is saved once in the Linux user’s mail transport. Rerun `bash scripts/setup.sh`, choose personal email setup, and choose to change the existing recipient. Enter the new inbox and confirm the test message before switching scheduled alerts. To stop email, enter `OFF` at the recipient prompt and confirm. The wizard clears the recipient and keeps scheduled monitoring and local reports running in mock mode.
+- **Scheduling is optional.** Install the Ubuntu cron package and check `systemctl is-active cron` if using systemd. Setup previews the jobs before asking to install them for the current user. On WSL, the distribution and daemon must be running and the laptop awake when a job is due. Inspect `runtime/cron.log` after a scheduled run. Remove only SysGuard's managed block with `bash scripts/setup_cron.sh --uninstall`.
+- **Reports arrive on schedule.** Monitoring runs each minute. The first scheduled daily report covers the previous day at the next 00:10 local time. Weekly reports cover the previous Monday–Sunday at 00:20 Monday. Look in `reports/daily/`, `reports/weekly/` and `reports/charts/`. At 00:30 daily, rotation archives completed days under `data/archive/`. Reports with samples need gnuplot with pngcairo and a font. Rotation needs gzip. PDF output is enabled by default and requires a compatible WeasyPrint (tested with 67.0), file and Poppler utilities on the cron PATH (`/usr/bin:/bin`). See [report dependencies](docs/REPORTS.md#dependencies).
+
 ## Run the monitor
 
 From the repository root, this example takes one real sample in a new temporary directory and checks where it was written.
