@@ -79,6 +79,33 @@ run $'y\nn\ny\nn'
 cmp "$FAKE_TABLE" "$temp/before"
 grep -q 'sample collected' "$temp/output"
 
+# Member C's reproduction: installing the default preview must never discard
+# the same explicit override from four jobs.
+(
+    custom="$temp/custom settings.conf"
+    printf '%s\n' REPORT_PDF_ENABLED=0 LOG_RETENTION_DAYS=90 MAIL_ENABLED=1 EMAIL_TO=person@example.test > "$custom"
+    for mode in mock real; do
+        options=()
+        [[ $mode == mock ]] || options=(--mail-mode real)
+        bash "$repo/scripts/setup_cron.sh" --install --config "$custom" "${options[@]}"
+        [[ $(grep -Fc -- "$custom" "$FAKE_TABLE") == 4 ]]
+        cp "$FAKE_TABLE" "$temp/expected-table"
+        run $'n\nn\nn\ny\ny'
+        cmp "$FAKE_TABLE" "$temp/expected-table" || {
+            echo "Explicit override jobs after wizard: $(grep -Fc -- "$custom" "$FAKE_TABLE") of 4" >&2
+            exit 1
+        }
+        if [[ $mode == real ]]; then
+            run $'n\ny\nOFF\ny'
+            grep -Fq 'scheduled email remains enabled' "$temp/output"
+            cmp "$FAKE_TABLE" "$temp/expected-table"
+            [[ ! -e $repo/config/local.conf && ! -e $MAIL_CALLS ]]
+        fi
+    done
+    cp "$temp/before" "$FAKE_TABLE"
+    rm -- "$FAKE_TABLE.writes"
+)
+
 conf=$repo/config/local.conf
 # Configuration privacy is checked before the loader can read an override.
 printf '%s\n' 'synthetic malformed outside file' > "$temp/outside-config"
