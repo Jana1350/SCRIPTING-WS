@@ -68,7 +68,7 @@ expect 0 "$cron" --install
 cmp "$FAKE_TABLE" "$temp/preview"
 [[ $(wc -l < "$FAKE_TABLE") == 6 ]]
 ! grep -Fq '%' "$FAKE_TABLE" || exit 1
-# Exercise the shell commands from the preview using only fixture A/C commands.
+# Exercise the preview using only fixtures for Janardhan Reddy's and Arnav Nakka's commands.
 for n in 2 3 4 5; do
     command_line=$(sed -n "${n}p" "$FAKE_TABLE" | cut -d' ' -f6-)
     /bin/sh -c "$command_line"
@@ -79,7 +79,7 @@ run_job() {
     command_line=$(sed -n "${1}p" "$temp/preview" | cut -d' ' -f6-)
     /bin/sh -c "$command_line"
 }
-# Standalone runs use a fixture collector. Integrated runs can supply A's scripts.
+# Standalone runs use a fixture collector. Integrated runs can supply Janardhan Reddy's scripts.
 if [[ -n ${SYSGUARD_TEST_MONITOR_SCRIPTS:-} ]]; then
     cp -- "$SYSGUARD_TEST_MONITOR_SCRIPTS/"{monitor.sh,main.sh} "$repo/scripts/"
 else

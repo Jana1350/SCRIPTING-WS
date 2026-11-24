@@ -287,7 +287,7 @@ collect_once() {
     local data_path
     data_path=$(safe_directory "$data_dir") || return 4
     mkdir -p -- "$data_path" || return 4
-    # Member C must use the same mapping: canonical default data uses the
+    # Arnav Nakka must use the same mapping: canonical default data uses the
     # repository runtime lock; every other canonical data directory owns its
     # persistent .metrics.lock. Open the active CSV only after acquiring it.
     if [[ $data_path == "$repo_root/data" || $data_path -ef $repo_root/data ]]; then

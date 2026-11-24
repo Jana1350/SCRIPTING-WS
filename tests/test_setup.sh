@@ -79,7 +79,7 @@ run $'y\nn\ny\nn'
 cmp "$FAKE_TABLE" "$temp/before"
 grep -q 'sample collected' "$temp/output"
 
-# Member C's reproduction: installing the default preview must never discard
+# Arnav Nakka's reproduction: installing the default preview must never discard
 # the same explicit override from four jobs.
 (
     custom="$temp/custom settings.conf"

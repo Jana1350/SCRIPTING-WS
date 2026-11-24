@@ -4,7 +4,7 @@ The team reviews shared interface changes together and versions fixtures when th
 
 ## C0. Goals and terminology
 
-One immutable interface for producer A (monitor), consumers B/C (alerts/reports), and C's log rotation. This contract describes a **WSL Ubuntu system-health monitor**; “real time” means periodic sampling with explicit latency, not uninterrupted hardware telemetry.
+One immutable interface for Janardhan Reddy's monitor, Chetan Yalla's alerts, and Arnav Nakka's reports and log rotation. This contract describes a **WSL Ubuntu system-health monitor**; “real time” means periodic sampling with explicit latency, not uninterrupted hardware telemetry.
 
 - `REPO_ROOT`: value of `git rev-parse --show-toplevel`, discovered in a **verified** SysGuard repository. No hard-coded user name, checkout name or GitHub URL.
 - All CLI paths with no leading slash resolve **relative to `REPO_ROOT`**. All scripts use stable path discovery based on script location, not current working directory.
@@ -15,25 +15,25 @@ One immutable interface for producer A (monitor), consumers B/C (alerts/reports)
 
 | Path | Owner | Contract |
 |---|---|---|
-| `config/defaults.conf` | A | Reviewed non-secret defaults, tracked |
-| `config/example.local.conf` | A | Example values, tracked; no live credentials |
+| `config/defaults.conf` | Janardhan Reddy | Reviewed non-secret defaults, tracked |
+| `config/example.local.conf` | Janardhan Reddy | Example values, tracked; no live credentials |
 | `config/local.conf` | Local user | Optional override, **ignored by Git**; setup publishes changes only after operator approval |
-| `data/metrics.csv` | A append, C rotate | Production metrics; file can be absent before first collection |
-| `data/archive/metrics-YYYY-MM-DD.csv.gz` | C | Archived CSV segment with header; rotation lock identical to monitor writer's |
-| `data/alerts/state.tsv` | B | Durable per-metric alert state; atomic writes; ignored |
-| `data/alerts/events.csv` | B | Append-only transitions; ignored |
-| `data/alerts/delivery.csv` | B | One row for each delivery attempt/outcome; ignored |
-| `reports/daily/YYYY-MM-DD.html` | C | Daily HTML for the **date represented**; ignored |
-| `reports/daily/YYYY-MM-DD.pdf` | C | Daily PDF target, if configured and tool verified; ignored |
-| `reports/weekly/YYYY-MM-DD_to_YYYY-MM-DD.html` | C | Prior complete Mon–Sun range; ignored |
-| `reports/weekly/YYYY-MM-DD_to_YYYY-MM-DD.pdf` | C | Corresponding PDF target; ignored |
-| `reports/charts/` | C | Deterministic generated PNGs/plots; ignored |
-| `runtime/metrics.lock` | A monitor and C rotator | **Same advisory `flock` lock file**; never remove while processes use it |
-| `runtime/alerts.lock` | B | One writer of alert state/events/deliveries |
-| `runtime/report.lock` | C | Prevent overlapping report runs |
-| `runtime/cron.lock` | B | Optional CLI/orchestrator overlap guard; scope defined during design |
+| `data/metrics.csv` | Janardhan Reddy (append), Arnav Nakka (rotate) | Production metrics; file can be absent before first collection |
+| `data/archive/metrics-YYYY-MM-DD.csv.gz` | Arnav Nakka | Archived CSV segment with header; rotation lock identical to monitor writer's |
+| `data/alerts/state.tsv` | Chetan Yalla | Durable per-metric alert state; atomic writes; ignored |
+| `data/alerts/events.csv` | Chetan Yalla | Append-only transitions; ignored |
+| `data/alerts/delivery.csv` | Chetan Yalla | One row for each delivery attempt/outcome; ignored |
+| `reports/daily/YYYY-MM-DD.html` | Arnav Nakka | Daily HTML for the **date represented**; ignored |
+| `reports/daily/YYYY-MM-DD.pdf` | Arnav Nakka | Daily PDF target, if configured and tool verified; ignored |
+| `reports/weekly/YYYY-MM-DD_to_YYYY-MM-DD.html` | Arnav Nakka | Prior complete Mon–Sun range; ignored |
+| `reports/weekly/YYYY-MM-DD_to_YYYY-MM-DD.pdf` | Arnav Nakka | Corresponding PDF target; ignored |
+| `reports/charts/` | Arnav Nakka | Deterministic generated PNGs/plots; ignored |
+| `runtime/metrics.lock` | Janardhan Reddy (monitor) and Arnav Nakka (rotator) | **Same advisory `flock` lock file**; never remove while processes use it |
+| `runtime/alerts.lock` | Chetan Yalla | One writer of alert state/events/deliveries |
+| `runtime/report.lock` | Arnav Nakka | Prevent overlapping report runs |
+| `runtime/cron.lock` | Chetan Yalla | Optional CLI/orchestrator overlap guard; scope defined during design |
 
-**Critical rotation race:** `flock` protects active CSV append, truncate/rename, and archive creation. C must never unlink/recreate the lock inode casually. A must open active CSV **after acquiring** the shared lock, not retain an append descriptor across rotation; lock release is guaranteed on failure. Reports can read a consistent snapshot under lock, then release it before expensive chart rendering.
+**Critical rotation race:** `flock` protects active CSV append, truncate/rename, and archive creation. Arnav Nakka must never unlink/recreate the lock inode casually. Janardhan Reddy must open active CSV **after acquiring** the shared lock, not retain an append descriptor across rotation; lock release is guaranteed on failure. Reports can read a consistent snapshot under lock, then release it before expensive chart rendering.
 
 ## C2. Metrics CSV v1
 
@@ -51,8 +51,8 @@ This example is **illustrative fixture material** and **not** a real computer me
 3. Comma-delimited, ASCII CSV, newline-terminated, **no quoted fields needed** because schema disallows commas/quotes/newlines within fields. Exactly four columns; no blank lines.
 4. Rows must be **strictly increasing** by timestamp as an actual instant. The monitor must avoid appending duplicate or backwards time observations: if new timestamp is `<=` last timestamp, return a clear nonzero error, or define/approve a deterministic alternative. Repeated seconds can happen under watch interval <1s; the proposed default interval exceeds 1s.
 5. File creation is atomic as practical: acquire lock; create parent with safe permissions; initialize exactly one header on first successful append; reject incorrect preexisting header; write each entire line as one append under lock; no row appended on any sensor failure. `umask 077` is appropriate for local data.
-6. **Only A's monitor appends new real observations.** B/C never generate production samples. C may rotate a fully validated file under the same lock. Fixtures live under `tests/fixtures/v1/` and must never be silently mixed into `data/metrics.csv`.
-7. A malformed **latest** row means B must report input error and **must not fall back** to an older good row. A missing or empty metrics file means no data, not a fake 0% reading. A timestamp older than `MAX_DATA_AGE_SECONDS` is stale; B must not send a new threshold alert based on stale input. C may skip malformed **historical** rows but must count and visibly disclose skipped rows; never claim a complete report if data is corrupted.
+6. **Only Janardhan Reddy's monitor appends new real observations.** Chetan Yalla and Arnav Nakka never generate production samples. Arnav Nakka may rotate a fully validated file under the same lock. Fixtures live under `tests/fixtures/v1/` and must never be silently mixed into `data/metrics.csv`.
+7. A malformed **latest** row means Chetan Yalla must report input error and **must not fall back** to an older good row. A missing or empty metrics file means no data, not a fake 0% reading. A timestamp older than `MAX_DATA_AGE_SECONDS` is stale; Chetan Yalla must not send a new threshold alert based on stale input. Arnav Nakka may skip malformed **historical** rows but must count and visibly disclose skipped rows; never claim a complete report if data is corrupted.
 8. For reports read from archive + active log, sort/deduplicate only if needed, avoid counting the same row twice, and document any integrity errors. A single active-file/header archive duplicate due to rotation must not inflate aggregates.
 
 ### CPU accounting: correct algorithm
@@ -103,7 +103,7 @@ REPORT_PDF_ENABLED=1
 
 Source `scripts/config.sh` and call `sysguard_config_load REPO_ROOT OVERRIDE OUTPUT [allow-standalone]`. Supply an absolute root, an absolute or repo-relative override (or an empty string), and the name of a writable associative array declared with `declare -A` or `declare -Ax`. Names beginning with `_sc_` and `LC_ALL` are reserved. Defaults are required unless the standalone policy is selected with a complete explicit file and defaults are absent.
 
-On success the loader replaces the array with the keys in the defaults example and returns `0`. It returns `2` for invalid input or missing required files and `4` for unreadable files, I/O errors, or directory-resolution failures. An unreadable selected configuration cannot fall back to defaults or standalone mode. Failure leaves the output array unchanged. The loader uses GNU `stat` and procfs and performs no collection, delivery, or runtime writes. Member B and C entry points adopt this interface in their own changes.
+On success the loader replaces the array with the keys in the defaults example and returns `0`. It returns `2` for invalid input or missing required files and `4` for unreadable files, I/O errors, or directory-resolution failures. An unreadable selected configuration cannot fall back to defaults or standalone mode. Failure leaves the output array unchanged. The loader uses GNU `stat` and procfs and performs no collection, delivery, or runtime writes. Chetan Yalla's and Arnav Nakka's entry points adopt this interface in their own changes.
 
 ## C4. CLI v1 (proposed; freeze as written or revise with team BEFORE code)
 
@@ -124,7 +124,7 @@ On success the loader replaces the array with the keys in the defaults example a
 
 ## C5. Alert state, event history and email semantics
 
-Persist **per-metric** severity: `cpu`, `memory`, `disk` in a stable `state.tsv`, keyed by name with last processed timestamp and severity `NORMAL|WARNING|CRITICAL`. Define formatting/atomic replace in B's tests before implementation. Events CSV proposed header:
+Persist **per-metric** severity: `cpu`, `memory`, `disk` in a stable `state.tsv`, keyed by name with last processed timestamp and severity `NORMAL|WARNING|CRITICAL`. Define formatting/atomic replace in Chetan Yalla's tests before implementation. Events CSV proposed header:
 
 ```csv
 timestamp,metric,previous_state,new_state,value,threshold,reason
@@ -182,7 +182,7 @@ timestamp,cpu_percent,memory_percent,disk_percent
 2026-11-20T08:05:00+05:30,72.0,50.0,40.0
 ```
 
-At CPU warning 75, critical 90, H=2, expected new event states (starting NORMAL): at 08:01 WARNING, at 08:02 CRITICAL, at 08:04 WARNING, at 08:05 NORMAL. 08:00 and 08:03 do not trigger a transition. Fixture file naming and versioning is owned by A and reviewed by B/C.
+At CPU warning 75, critical 90, H=2, expected new event states (starting NORMAL): at 08:01 WARNING, at 08:02 CRITICAL, at 08:04 WARNING, at 08:05 NORMAL. 08:00 and 08:03 do not trigger a transition. Fixture file naming and versioning is owned by Janardhan Reddy and reviewed by Chetan Yalla and Arnav Nakka.
 
 Proposed additional fixtures: `/proc/stat` counter pairs (normal, negative delta, zero delta, missing fields), `/proc/meminfo` (normal, 0 total, no available), `df -P` output (valid, missing configured mount, permission failure), invalid CSV rows, offsets around midnight, week boundaries, archived gzip files, mail mock success/failure, permissions/lock collision. **Do not** generate a production log by copying these fixtures into the actual data directory.
 

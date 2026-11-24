@@ -1,6 +1,6 @@
 # SysGuard
 
-SysGuard samples CPU, memory, and filesystem usage on WSL Ubuntu and records complete measurements in a CSV. Member A owns the Bash monitor, configuration, and orchestration. Member B owns alerts, email, and cron. Member C owns reports, charts, and log rotation. The shared interface is specified in [docs/CONTRACTS.md](docs/CONTRACTS.md).
+SysGuard samples CPU, memory, and filesystem usage on WSL Ubuntu and records complete measurements in a CSV. Janardhan Reddy owns the Bash monitor, configuration, and orchestration. Chetan Yalla owns alerts, email, and cron. Arnav Nakka owns reports, charts, and log rotation. The shared interface is specified in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
 ## Run SysGuard locally
 
@@ -102,6 +102,6 @@ bash tests/test_monitor.sh
 bash tests/run_all.sh
 ```
 
-Run the first command for Member A's suite. It uses temporary directories, deterministic sensor inputs, and test-only child executables. The signal checks use Python 3. The second command checks the shared fixture against contract C9 before running all seven required suites. Successful completion prints `Suites: 7 passed, 0 skipped`. A missing suite fails the runner. Report tests require the renderer and PDF inspection dependencies listed above.
+Run the first command for Janardhan Reddy's suite. It uses temporary directories, deterministic sensor inputs, and test-only child executables. The signal checks use Python 3. The second command checks the shared fixture against contract C9 before running all seven required suites. Successful completion prints `Suites: 7 passed, 0 skipped`. A missing suite fails the runner. Report tests require the renderer and PDF inspection dependencies listed above.
 
-Member A's tests use a real advisory lock and a controlled clock to check that watch skips contended samples and publishes a fresh row on schedule after release. They also exercise simulated rotation. Delegation tests verify arguments and exit propagation with temporary stand-ins. Use the full runner's output for the suite results in your checkout.
+Janardhan Reddy's tests use a real advisory lock and a controlled clock to check that watch skips contended samples and publishes a fresh row on schedule after release. They also exercise simulated rotation. Delegation tests verify arguments and exit propagation with temporary stand-ins. Use the full runner's output for the suite results in your checkout.
