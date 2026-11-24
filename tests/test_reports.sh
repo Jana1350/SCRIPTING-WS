@@ -128,7 +128,7 @@ expect_status 0 '' "${config_preview[@]}"
 assert_contains "$checkout/config/local.conf" "$stderr"
 printf '%s\n' REPORT_PDF_ENABLED=2 > "$checkout/config/local.conf"
 mkdir -- "$checkout/disk fixture"
-printf '%s\n' REPORT_PDF_ENABLED=0 CPU_WARNING=0 CPU_CRITICAL=100 ALERT_HYSTERESIS_PERCENT=0 \
+printf '%s\n' REPORT_PDF_ENABLED=0 CPU_WARNING=1 CPU_CRITICAL=100 ALERT_HYSTERESIS_PERCENT=0 \
     WATCH_INTERVAL_SECONDS=00060 LOG_RETENTION_DAYS=999999999999999999 'DISK_MOUNT=disk fixture/.' \
     > "$checkout/config/report override.conf"
 expect_status 0 '' "${config_preview[@]}" --config 'config/report override.conf'

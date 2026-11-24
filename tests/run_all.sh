@@ -17,13 +17,7 @@ if ! awk '
 fi
 
 passed=0
-skipped=0
-for suite in test_monitor test_alerts test_cron test_reports test_rotation test_setup; do
-    if [[ $suite != test_monitor && ! -e $tests/$suite.sh ]]; then
-        printf 'SKIP: %s.sh unavailable\n' "$suite"
-        skipped=$((skipped + 1))
-        continue
-    fi
+for suite in test_monitor test_alerts test_cron test_reports test_rotation test_setup test_positive_warnings; do
     bash "$tests/$suite.sh" || {
         status=$?
         printf 'FAIL: %s.sh exited %d\n' "$suite" "$status" >&2
@@ -31,4 +25,4 @@ for suite in test_monitor test_alerts test_cron test_reports test_rotation test_
     }
     passed=$((passed + 1))
 done
-printf 'Suites: %d passed, %d skipped\n' "$passed" "$skipped"
+printf 'Suites: %d passed, 0 skipped\n' "$passed"

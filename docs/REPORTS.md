@@ -96,7 +96,7 @@ Run this block from the repository root on or after November 21, 2026. It copies
 ```bash
 (
   set -euo pipefail
-  export LC_ALL=C TZ=Asia/Kolkata
+  export LC_ALL=C TZ=Etc/UTC
   root=$(git rev-parse --show-toplevel)
   demo=$(mktemp -d /tmp/sysguard-reports-demo.XXXXXXXX)
   printf 'Fixture artifacts: %s\n' "$demo"

@@ -1,6 +1,6 @@
-# Draft for future `docs/CONTRACTS.md` — SysGuard Shared API v1
+# SysGuard Shared API v1
 
-**STATUS: PROPOSED, NOT APPROVED OR INSTALLED.** All three members must review this together, compare with any existing code, sign off, and commit a versioned baseline **before** independent implementation. No contracts change without a team review and a fixture version bump where behavior changes. This is a **draft text file for planning**, not evidence that `docs/CONTRACTS.md` exists in Ubuntu.
+The team reviews shared interface changes together and versions fixtures when their expected behavior changes.
 
 ## C0. Goals and terminology
 
@@ -17,7 +17,7 @@ One immutable interface for producer A (monitor), consumers B/C (alerts/reports)
 |---|---|---|
 | `config/defaults.conf` | A | Reviewed non-secret defaults, tracked |
 | `config/example.local.conf` | A | Example values, tracked; no live credentials |
-| `config/local.conf` | Local user | Optional override, **ignored by Git**; never overwrite |
+| `config/local.conf` | Local user | Optional override, **ignored by Git**; setup publishes changes only after operator approval |
 | `data/metrics.csv` | A append, C rotate | Production metrics; file can be absent before first collection |
 | `data/archive/metrics-YYYY-MM-DD.csv.gz` | C | Archived CSV segment with header; rotation lock identical to monitor writer's |
 | `data/alerts/state.tsv` | B | Durable per-metric alert state; atomic writes; ignored |
@@ -158,12 +158,12 @@ timestamp,event_id,recipient,status,detail
 
 - Rotation boundary at midnight (after sampling from the previous day completes); archive **only complete local calendar dates**, never truncate current-day rows. Under `runtime/metrics.lock`, create durable compressed archive with header `data/archive/metrics-YYYY-MM-DD.csv.gz`, validate with `gzip -t` and count/compare rows before replacing active CSV. Prefer temporary file + atomic rename; no data loss if compression, write, or disk space fails.
 - If target archive already exists, run must be **idempotent**; do not duplicate rows or blindly overwrite. Any mismatch is explicit error and preserves original data. Keep current-day rows in live CSV with exactly one header.
-- Retention uses `LOG_RETENTION_DAYS` counted from `--as-of` local date; do not expire a date still needed by the prior completed weekly report or required instructor demo. **Default 30 days is a proposal**, not a rule. Retention cleanup is a separate reviewed substep; dry-run before actual deletion; never delete unexpected path or follow symlinks out of data dir. Tests run against temp fixtures, never production data.
+- Retention is preview-only. Dry-run uses `LOG_RETENTION_DAYS` (default 30) counted from the `--as-of` local date and protects the prior completed weekly report and later dates. Rotation does not delete old archives.
 - Consumers must continue reading archives; re-running a report after rotation should yield identical computed stats given the same input data.
 
 ## C8. Cron and runtime operations
 
-- Proposed schedule (subject to team decision): every minute `main.sh --once`; daily at `00:10` local `report.sh daily`; Mondays `00:20` local `report.sh weekly`; daily `00:30` rotation. **Operational concern:** daily at 00:10 should include prior-day samples; rotation at 00:30 comes after report but weekly must later be reproducible from archive. WSL cron works only while its environment/service is active; if WSL stops, schedules may be missed.
+- V1.0 uses UTC for the scheduler, monitor, report and rotation. The schedule runs `main.sh --once` every minute, `report.sh daily` at 00:10 UTC, `report.sh weekly` on Mondays at 00:20 UTC, and rotation at 00:30 UTC daily. Reports use completed dates and can also read the archives after rotation. WSL jobs can be missed if the instance or cron daemon is stopped or the host is asleep.
 - Install with a uniquely delimited **managed block** so repeating `--install` replaces only SysGuard lines, preserves unrelated crontab entries and never duplicates. `--uninstall` removes managed block **only**, ideally after preview. No auto-install in tests. Verify first `crontab -l`; an empty crontab is valid and not a reason to erase others' work.
 - Set `SHELL=/bin/bash`, safe `PATH=...`, explicit `TZ`/`CRON_TZ` only where supported, and **absolute paths** based on verified repo root (never literal `~` or runtime PWD). Avoid literal `%` in cron commands (cron treats `%` specially). Direct stdout/stderr to scoped log, with rotation. Ensure overlap guards (`flock`) and no concurrent report or rotate corruption.
 - `mailx` availability, MTA/SMTP routing, sender authentication, recipient, network reachability and anti-spam settings all require independent real validation. Never store passwords in Git or trigger a real send during unit tests. No claim that a service is enabled merely because its binary exists.
@@ -188,4 +188,4 @@ Proposed additional fixtures: `/proc/stat` counter pairs (normal, negative delta
 
 ## C10. Acceptance gates for contract v1
 
-The team must explicitly answer and record: exact `--date` weekly semantics; PDF required or enabled optional; mail mode and actual MTA; whether cron calls `main.sh` once per minute; default timezone; versioned fixture policy; log retention/minimum report history; whether cool-down reminders are in scope; each role's owned files; repo path and GitHub ownership; handling of malformed history; and locking technology availability. Then approve this file as `docs/CONTRACTS.md` and the agent rules **before** sending a role's implementation phase to Codex.
+Run all seven suites with `bash tests/run_all.sh` in an isolated checkout. Verify the UTC schedule separately from actual daemon execution. Scope live evidence to the deployed revision and use [deployment acceptance](DEPLOYMENT-ACCEPTANCE.md) to track remaining fresh-machine and scheduled maintenance checks.
