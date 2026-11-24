@@ -11,7 +11,8 @@
 # to eighteen decimal digits (including any padding), normalized in OUTPUT.
 # Booleans retain exactly 0 or 1, and DISK_MOUNT is a physical absolute path.
 # Returns 0 on success, 2 for invalid input or a missing required file, and 4
-# for an I/O or directory resolution failure. Failure leaves OUTPUT unchanged.
+# for an unreadable file, an I/O error or directory resolution failure.
+# Failure leaves OUTPUT unchanged.
 # Requires GNU stat and procfs for regular-file reads. Writes only diagnostics
 # and file paths to stderr. It performs no collection,
 # delivery, directory creation or writes to configuration or runtime files.
@@ -21,7 +22,15 @@ _sysguard_config_read() {
     local -n _sc_target=$2
     local -A _sc_seen=()
     [[ -f $_sc_file ]] || return 2
+    if [[ ! -r $_sc_file ]]; then
+        printf 'sysguard: unreadable configuration file: %s\n' "$_sc_file" >&2
+        return 4
+    fi
     exec {_sc_fd}< "$_sc_file" || return 4
+    if [[ ! -f /proc/self/fd/$_sc_fd ]]; then
+        exec {_sc_fd}<&-
+        return 2
+    fi
     _sc_size=$(stat -Lc '%s' -- "/proc/self/fd/$_sc_fd") || {
         exec {_sc_fd}<&-
         return 4
@@ -73,6 +82,12 @@ sysguard_config_load() {
         [WATCH_INTERVAL_SECONDS]='' [MAX_DATA_AGE_SECONDS]='' [ALERT_HYSTERESIS_PERCENT]=''
         [LOG_RETENTION_DAYS]='' [EMAIL_TO]='' [MAIL_ENABLED]='' [REPORT_PDF_ENABLED]=''
     )
+    # Failed directory traversal must not look like absent defaults or an
+    # absent optional override.
+    if [[ -d ${_sc_default%/*} && ! -x ${_sc_default%/*} ]]; then
+        printf 'sysguard: configuration directory is inaccessible: %s\n' "${_sc_default%/*}" >&2
+        return 4
+    fi
     if [[ -z $_sc_override ]]; then
         _sc_override=${_sc_root%/}/config/local.conf
         [[ -e $_sc_override || -L $_sc_override ]] || _sc_override=''

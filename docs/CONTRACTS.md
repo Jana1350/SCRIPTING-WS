@@ -103,7 +103,7 @@ REPORT_PDF_ENABLED=1
 
 Source `scripts/config.sh` and call `sysguard_config_load REPO_ROOT OVERRIDE OUTPUT [allow-standalone]`. Supply an absolute root, an absolute or repo-relative override (or an empty string), and the name of a writable associative array declared with `declare -A` or `declare -Ax`. Names beginning with `_sc_` and `LC_ALL` are reserved. Defaults are required unless the standalone policy is selected with a complete explicit file and defaults are absent.
 
-On success the loader replaces the array with the keys in the defaults example and returns `0`. It returns `2` for invalid input or missing required files and `4` for read or directory-resolution failures. Failure leaves the output array unchanged. The loader uses GNU `stat` and procfs and performs no collection, delivery, or runtime writes. Member B and C entry points adopt this interface in their own changes.
+On success the loader replaces the array with the keys in the defaults example and returns `0`. It returns `2` for invalid input or missing required files and `4` for unreadable files, I/O errors, or directory-resolution failures. An unreadable selected configuration cannot fall back to defaults or standalone mode. Failure leaves the output array unchanged. The loader uses GNU `stat` and procfs and performs no collection, delivery, or runtime writes. Member B and C entry points adopt this interface in their own changes.
 
 ## C4. CLI v1 (proposed; freeze as written or revise with team BEFORE code)
 

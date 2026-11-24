@@ -531,6 +531,62 @@ PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 2 --once \
 [[ ! -s $CALL_LOG && ! -e $suite/absent-data && ! -e $suite/runtime ]] ||
     fail 'unsafe config path caused collection or runtime activity'
 
+# Check the loader itself and a relative spelling of the same unsafe path.
+cp "$work/shared-valid.conf" "$suite/relative.conf"$'\n'
+rc=0
+sysguard_config_load "$suite" $'relative.conf\n' parsed || rc=$?
+[[ $rc == 2 && ${parsed[CPU_WARNING]} == 8 ]] || fail 'unsafe relative override or modified output'
+main_exit 2 --status --config $'relative.conf\n'
+
+# Physical mount resolution must preserve and reject a trailing newline.
+mkdir "$suite/mount target"$'\n'
+ln -s $'mount target\n' "$suite/mount-alias"
+printf '%s\n' DISK_MOUNT=mount-alias > "$work/unsafe-mount.conf"
+rc=0
+sysguard_config_load "$suite" "$work/unsafe-mount.conf" parsed || rc=$?
+[[ $rc == 2 && ${parsed[DISK_MOUNT]} == "$suite/disk fixture" ]] || fail 'unsafe physical mount path'
+
+if (( EUID != 0 )); then
+    cp "$work/shared-valid.conf" "$suite/unreadable.conf"
+    chmod 000 "$suite/unreadable.conf"
+    rc=0
+    sysguard_config_load "$suite" unreadable.conf parsed || rc=$?
+    [[ $rc == 4 && ${parsed[CPU_WARNING]} == 8 ]] || fail 'unreadable override or modified output'
+    expect_status 4 --once --config "$suite/unreadable.conf" --data-dir "$suite/absent-data"
+    main_exit 4 --status --config unreadable.conf
+    : > "$CALL_LOG"
+    for delivery in mock real; do
+        options=()
+        [[ $delivery != real ]] || options+=(--mail-mode real)
+        PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 4 --once "${options[@]}" \
+            --config unreadable.conf --data-dir "$suite/absent-data"
+    done
+    [[ ! -s $CALL_LOG && ! -e $suite/absent-data && ! -e $suite/runtime ]] ||
+        fail 'unreadable override caused collection or runtime activity'
+
+    cp "$work/shared-valid.conf" "$suite/config/local.conf"
+    chmod 000 "$suite/config/local.conf"
+    main_exit 4 --status
+    # The selected explicit override takes precedence over the unreadable local file.
+    main_exit 0 --status --config "$work/shared-valid.conf"
+    chmod 600 "$suite/config/local.conf"
+    unlink "$suite/config/local.conf"
+    chmod 600 "$suite/unreadable.conf"
+
+    chmod 000 "$suite/config/defaults.conf"
+    rc=0
+    sysguard_config_load "$suite" "$work/shared-valid.conf" parsed allow-standalone || rc=$?
+    [[ $rc == 4 && ${parsed[CPU_WARNING]} == 8 ]] || fail 'unreadable defaults allowed standalone fallback'
+    chmod 600 "$suite/config/defaults.conf"
+    # An inaccessible config directory must not trigger standalone fallback.
+    chmod 600 "$suite/config"
+    rc=0
+    sysguard_config_load "$suite" "$work/shared-valid.conf" parsed allow-standalone || rc=$?
+    chmod 700 "$suite/config"
+    [[ $rc == 4 && ${parsed[CPU_WARNING]} == 8 ]] || fail 'inaccessible config directory allowed fallback'
+    printf '%s\n' 'PASS: unreadable explicit, implicit and default configuration failures'
+fi
+
 mkdir "$work/standalone"
 sysguard_config_load "$work/standalone" "$suite/config/defaults.conf" parsed allow-standalone
 rc=0
