@@ -5,15 +5,22 @@ repo=$(CDPATH='' cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
 checkout="$scratch/checkout with spaces"
-mkdir -p "$checkout"/{scripts,config,tests} "$scratch/bin" "$scratch/home"
+mkdir -p "$checkout"/{scripts,config,tests} "$scratch"/{bin,preferred,alternate,home}
 cp -- "$repo/sysguard.sh" "$repo/.gitignore" "$checkout/"
 cp -- "$repo"/scripts/{config,alerts,setup,setup_cron}.sh "$checkout/scripts/"
 cp -- "$repo"/config/{defaults.conf,example.local.conf} "$checkout/config/"
 git -C "$checkout" init -q
 export TABLE="$scratch/table" CALLS="$scratch/calls" OPEN_LOG="$scratch/open" MAIL_LOG="$scratch/mail"
 export CRON_WRITES="$scratch/cron-writes" CRON_READS="$scratch/cron-reads" FOREIGN="$scratch/foreign"
-export HOME="$scratch/home" PATH="$scratch/bin:/usr/bin:/bin" TZ=Etc/UTC LC_ALL=C
-unset WSL_INTEROP
+export FIXTURE_NOW=2026-11-24T23:59:59Z FIXTURE_CLOCK_SEEN="$scratch/clock-seen"
+# Every child inherits an allowlist. Omitting a fixture opener must leave it
+# unavailable, even on hosts with extra desktop utilities installed.
+for tool in awk base64 bash cat chmod cmp cp dirname flock git grep id ln mkdir mktemp mv od python3 rm sed sleep stat tail touch tr unlink wc; do
+    ln -s "/usr/bin/$tool" "$scratch/bin/$tool"
+done
+export HOME="$scratch/home" PATH="$scratch/preferred:$scratch/alternate:$scratch/bin" TZ=Etc/UTC LC_ALL=C
+unset WSL_INTEROP BASH_ENV ENV
+unset -f powershell.exe explorer.exe wslview xdg-open gio
 printf '%s\n' '17 4 * * * /bin/true # unrelated' > "$scratch/unrelated"
 cp "$scratch/unrelated" "$TABLE"
 : > "$CALLS"; : > "$CRON_WRITES"
@@ -43,7 +50,8 @@ case "$*" in
         command -v mailx ;;
     '-i PATH=/usr/bin:/bin HOME='*' LC_ALL=C sh -c mailx --help') mailx --help ;;
     '-u TZ date +%Z %z') echo 'UTC +0000' ;;
-    *) exec /usr/bin/env "$@" ;;
+    'PATH=/usr/bin:/bin sh -c command -v "$1" sh '*) command -v "${!#}" ;;
+    *) exit 99 ;;
 esac
 STUB
 cat > "$scratch/bin/mailx" <<'STUB'
@@ -53,10 +61,42 @@ echo forbidden >> "$MAIL_LOG"
 exit 99
 STUB
 printf '#!/bin/sh\necho active\n' > "$scratch/bin/systemctl"
-cat > "$scratch/bin/xdg-open" <<'STUB'
+cat > "$scratch/bin/date" <<'STUB'
 #!/bin/bash
-printf '%s\n' "$1" >> "$OPEN_LOG"
+case "$*" in
+    '-u +%F')
+        instant=$FIXTURE_NOW
+        if [[ -n ${FIXTURE_ROLLOVER-} ]]; then
+            if [[ -e $FIXTURE_CLOCK_SEEN ]]; then instant=$FIXTURE_ROLLOVER
+            else : > "$FIXTURE_CLOCK_SEEN"; fi
+        fi
+        exec /usr/bin/date -u -d "$instant" +%F ;;
+    '+%F') exec /usr/bin/date -d "$FIXTURE_NOW" +%F ;;
+    *) exec /usr/bin/date "$@" ;;
+esac
+STUB
+cat > "$scratch/preferred/xdg-open" <<'STUB'
+#!/bin/bash
+[[ $# == 1 && $1 == /* ]] || exit 98
+printf 'xdg-open %s\n' "$1" >> "$OPEN_LOG"
 exit "${OPENER_STATUS:-0}"
+STUB
+cat > "$scratch/alternate/gio" <<'STUB'
+#!/bin/bash
+[[ $# == 2 && $1 == open && $2 == /* ]] || exit 98
+printf 'gio %s\n' "$2" >> "$OPEN_LOG"
+exit "${OPENER_STATUS:-0}"
+STUB
+cat > "$scratch/alternate/wslview" <<'STUB'
+#!/bin/bash
+[[ $# == 1 && $1 == /* ]] || exit 98
+printf 'wslview %s\n' "$1" >> "$OPEN_LOG"
+exit "${OPENER_STATUS:-0}"
+STUB
+cat > "$scratch/bin/explorer.exe" <<'STUB'
+#!/bin/bash
+printf 'Unexpected Explorer launch: %s\n' "$*" >> "$OPEN_LOG"
+exit 99
 STUB
 printf '#!/bin/sh\nexit 0\n' > "$scratch/bin/pdfinfo"
 cat > "$scratch/bin/wslpath" <<'STUB'
@@ -64,17 +104,18 @@ cat > "$scratch/bin/wslpath" <<'STUB'
 [[ $# == 2 && $1 == -w && $2 == *'checkout with spaces'* ]] || exit 1
 printf '\\\\wsl.localhost\\Ubuntu%s\n' "${2//\//\\}"
 STUB
-cat > "$scratch/bin/powershell.exe" <<'STUB'
+cat > "$scratch/preferred/powershell.exe" <<'STUB'
 #!/bin/bash
 set -euo pipefail
 [[ $# == 4 && $1 == -NoProfile && $2 == -NonInteractive && $3 == -Command ]]
 [[ $4 == *'Invoke-Item -LiteralPath $p -ErrorAction Stop'* ]]
 re="FromBase64String\('([A-Za-z0-9+/=]+)'\)"
 [[ $4 =~ $re ]]
-printf 'WSL %s\n' "$(printf '%s' "${BASH_REMATCH[1]}" | base64 -d)" >> "$OPEN_LOG"
+printf 'powershell.exe %s\n' "$(printf '%s' "${BASH_REMATCH[1]}" | base64 -d)" >> "$OPEN_LOG"
 exit "${WINDOWS_STATUS:-0}"
 STUB
-chmod 700 "$scratch/bin/"*
+chmod 700 "$scratch/bin/"{crontab,date,env,explorer.exe,mailx,pdfinfo,systemctl,wslpath} \
+    "$scratch/preferred/"* "$scratch/alternate/"*
 
 cat > "$checkout/scripts/main.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -108,7 +149,7 @@ root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 dir=$root/reports/$1
 name=2026-11-23
 if [[ $1 == weekly ]]; then name=2026-11-16_to_2026-11-22; fi
-if [[ $1 == today ]]; then name=2026-11-24; fi
+if [[ $1 == today ]]; then name=$(date -u +%F); fi
 mkdir -p "$dir" "$root/reports/charts"
 printf '<h2>NO DATA</h2>\n' > "$dir/$name.html"
 printf 'Wrote %s\n' "$dir/$name.html"
@@ -138,6 +179,7 @@ run() {
     (cd "$scratch"; /usr/bin/timeout -k 3s 15s bash "$checkout/sysguard.sh") <<< "$1" > "$scratch/output" 2>&1
 }
 expect_table() { cmp "$1" "$TABLE" || fail 'crontab differs'; }
+expect_opens() { printf '%s\n' "$@" | cmp - "$OPEN_LOG" || fail 'unexpected opener commands or arguments'; }
 seed() {
     cat "$scratch/unrelated" > "$TABLE"
     bash "$checkout/scripts/setup_cron.sh" --print "$@" >> "$TABLE"
@@ -352,33 +394,98 @@ contains 'Report period (UTC): 2026-11-23'
 contains 'Report period (UTC): 2026-11-16_to_2026-11-22'
 contains 'NO DATA: the report succeeded'
 test ! -e "$OPEN_LOG"
+run $'7\n1\nn\n0\n0'
+contains "No current-day PDF is available for 2026-11-24 (UTC)."
+contains "Generate today's report with 6 -> 1."
+test ! -e "$OPEN_LOG"
+
+partial=$checkout/reports/today
+yesterday=$partial/2026-11-23.pdf
+today=$partial/2026-11-24.pdf
+tomorrow=$partial/2026-11-25.pdf
+mkdir -p "$partial"
+printf '%%PDF-1.7\n' > "$yesterday"
+run $'7\n1\nn\n0\n0'
+contains "No current-day PDF is available for 2026-11-24 (UTC)."
+absent "Open $yesterday?"
+test ! -e "$OPEN_LOG"
+run $'7\n4\ny\n0\n0'
+expect_opens "xdg-open $partial"
+test -f "$yesterday"
+: > "$OPEN_LOG"
 run $'7\n1\ny\n1\nn\n0\n0\n0'
 contains 'No current-day PDF is available'
-contains "$checkout/reports/today/2026-11-24.pdf"
-test ! -e "$OPEN_LOG"
+contains "$today"
+test ! -s "$OPEN_LOG"
+run $'7\n1\nn\n0\n0'
+contains "Open $today?"
+absent "Open $yesterday?"
+test ! -s "$OPEN_LOG"
+
+printf '%%PDF-1.7\n' > "$tomorrow"
+[[ $(TZ=Asia/Kolkata date +%F) == 2026-11-25 && $(date -u +%F) == 2026-11-24 ]]
+TZ=Asia/Kolkata run $'7\n1\ny\n0\n0'
+expect_opens "xdg-open $today"
+: > "$OPEN_LOG"
+FIXTURE_ROLLOVER=2026-11-25T00:00:00Z run $'7\n1\ny\n0\n0'
+contains "Open $today?"
+contains 'The UTC date changed.'
+test ! -s "$OPEN_LOG"
+FIXTURE_NOW=2026-11-25T00:00:00Z run $'7\n1\ny\n0\n0'
+expect_opens "xdg-open $tomorrow"
+[[ -f $yesterday && -f $today ]]
+printf 'PASS exact UTC PDF date, no stale substitution, decline, local-date difference and midnight rollover\n'
+
+: > "$OPEN_LOG"
+run $'7\n2\ny\n3\ny\n0\n0'
+expect_opens "xdg-open $checkout/reports/daily/2026-11-23.pdf" \
+    "xdg-open $checkout/reports/weekly/2026-11-16_to_2026-11-22.pdf"
+: > "$OPEN_LOG"
 OPENER_STATUS=12 run $'7\n2\ny\n0\n0'
 contains 'Opener failed (exit 12).'
 contains 'Fallback (Linux desktop): xdg-open '
 absent 'Opener accepted'
-grep -Fxq "$checkout/reports/daily/2026-11-23.pdf" "$OPEN_LOG"
+expect_opens "xdg-open $checkout/reports/daily/2026-11-23.pdf"
+: > "$OPEN_LOG"
 WSL_INTEROP=fixture run $'7\n1\ny\n4\ny\n0\n0'
-grep -Fxq "WSL \\\\wsl.localhost\\Ubuntu${checkout//\//\\}\\reports\\today\\2026-11-24.pdf" "$OPEN_LOG"
-grep -Fxq "WSL \\\\wsl.localhost\\Ubuntu${checkout//\//\\}\\reports\\today" "$OPEN_LOG"
+expect_opens "powershell.exe \\\\wsl.localhost\\Ubuntu${today//\//\\}" \
+    "powershell.exe \\\\wsl.localhost\\Ubuntu${partial//\//\\}"
 contains 'Opener accepted:'
+: > "$OPEN_LOG"
 WINDOWS_STATUS=1 WSL_INTEROP=fixture run $'7\n4\ny\n0\n0'
 contains 'Opener failed (exit 1).'
 contains "Fallback (WSL): explorer.exe \"\$(wslpath -w "
 absent 'Opener accepted'
+expect_opens "powershell.exe \\\\wsl.localhost\\Ubuntu${partial//\//\\}"
 chart="$checkout/reports/charts/chart with spaces & symbols.png"
 touch "$chart"
+: > "$OPEN_LOG"
 run $'7\n7\n1\ny\n7\n4\ny\n0\n0'
-grep -Fxq "$checkout/reports/today/2026-11-24.html" "$OPEN_LOG"
-grep -Fxq "$chart" "$OPEN_LOG"
+expect_opens "xdg-open ${today%.pdf}.html" "xdg-open $chart"
+: > "$OPEN_LOG"
 WSL_INTEROP=fixture run $'7\n7\n4\ny\n0\n0'
-grep -Fxq "WSL \\\\wsl.localhost\\Ubuntu${chart//\//\\}" "$OPEN_LOG"
+expect_opens "powershell.exe \\\\wsl.localhost\\Ubuntu${chart//\//\\}"
+: > "$OPEN_LOG"
+PATH="$scratch/alternate:$scratch/bin" WSL_INTEROP=fixture run $'7\n1\ny\n0\n0'
+expect_opens "wslview $today"
+contains 'Opener accepted:'
+: > "$OPEN_LOG"
+PATH="$scratch/alternate:$scratch/bin" run $'7\n7\n4\ny\n0\n0'
+expect_opens "gio $chart"
+contains 'Opener accepted:'
+: > "$OPEN_LOG"
+PATH="$scratch/alternate:$scratch/bin" OPENER_STATUS=9 run $'7\n4\ny\n0\n0'
+expect_opens "gio $partial"
+contains 'Opener failed (exit 9).'
+absent 'Opener accepted:'
+: > "$OPEN_LOG"
+PATH="$scratch/bin" WSL_INTEROP=fixture run $'7\n4\ny\n0\n0'
+contains 'No graphical opener is available.'
+contains "Fallback (WSL): explorer.exe \"\$(wslpath -w "
+test ! -s "$OPEN_LOG"
 WITHOUT_PDF=1 run $'6\n3\n0\n0'
 contains 'This run did not publish a PDF.'
-printf 'PASS report dispatch, NO DATA, missing artifacts, declined and failed PDF opening\n'
+printf 'PASS report dispatch, NO DATA, desktop opener arguments, fallback, failures and unavailable openers\n'
 
 : > "$CALLS"
 run $'8\n2\n3\n4\nn\n0\n11\n2\nn\n2\ny\n0\n0'
@@ -397,6 +504,7 @@ PATH="$scratch/short-path" run $'7\n4\ny\n0\n0'
 contains 'No graphical opener is available.'
 contains "Path: $checkout/reports/today"
 contains 'Fallback (Linux desktop): xdg-open '
+test ! -s "$OPEN_LOG"
 test ! -e "$MAIL_LOG"
 if compgen -G "$checkout/config/.sysguard-*.log" >/dev/null; then fail 'staging file remains'; fi
 printf 'PASS history, regression dispatch, missing dependencies, and zero mail calls\n'

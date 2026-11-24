@@ -704,13 +704,20 @@ open_path() {
 }
 
 offer_pdf() {
-    local file=$1 period=$2
+    local file=$1 period=$2 day
     if ! pdf_file "$file" "$period"; then
         printf 'PDF missing or invalid: %s\n' "$file"
         return 4
     fi
     if ask "Open $file?"; then
         pdf_file "$file" "$period" || { printf 'PDF changed before opening.\n'; return 4; }
+        if [[ $period == today ]]; then
+            day=$(date -u +%F) || return 4
+            if [[ ${file##*/} != "$day.pdf" ]]; then
+                notice 33 "The UTC date changed. Use Generate Reports (6 -> 1) to generate today's report."
+                return 4
+            fi
+        fi
         open_path "$file"
     fi
 }
@@ -774,21 +781,27 @@ missing_report() {
 }
 
 latest_pdf() {
-    local period=$1 file latest=''
+    local period=$1 file latest='' day
     local -A settings=()
     if ! command -v pdfinfo >/dev/null; then
         printf 'PDF verification needs pdfinfo. Folder: %s\n' "$root/reports/$period"
         return 7
     fi
     if load_settings settings && [[ ${settings[REPORT_PDF_ENABLED]} == 0 ]]; then
-        printf '%s\n' 'PDF generation is disabled. An older PDF may still be available.'
+        printf '%s\n' 'PDF generation is disabled. Existing PDFs are still available.'
+    fi
+    if [[ $period == today ]]; then
+        day=$(date -u +%F) || return 4
+        file=$root/reports/today/$day.pdf
+        if pdf_file "$file" "$period"; then offer_pdf "$file" "$period"
+        else missing_report "No current-day PDF is available for $day (UTC). Generate today's report with 6 -> 1."; fi
+        return
     fi
     for file in "$root/reports/$period/"*.pdf; do
         if pdf_file "$file" "$period"; then latest=$file; fi
     done
     if [[ -z $latest ]]; then
-        if [[ $period == today ]]; then missing_report "No current-day PDF is available in $root/reports/today."
-        else missing_report "No verified $period PDF was found in $root/reports/$period."; fi
+        missing_report "No verified $period PDF was found in $root/reports/$period."
         return 0
     fi
     offer_pdf "$latest" "$period"
@@ -830,10 +843,10 @@ view_menu() {
         cat <<'MENU'
 
 View reports and charts
-1. Open latest current-day PDF
+1. Open today's PDF (UTC)
 2. Open latest daily PDF
 3. Open latest weekly PDF
-4. Open current-day reports folder
+4. Open partial reports folder
 5. Open daily reports folder
 6. Open weekly reports folder
 7. View available HTML reports and PNG charts

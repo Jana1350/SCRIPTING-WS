@@ -58,7 +58,7 @@ The cron guard rechecks the entire table before writing and preserves unrelated 
 
 | Generate Reports (6) | Window in the launcher | Artifacts |
 |---|---|---|
-| 1. Generate today's report | UTC midnight inclusive to a single captured current instant exclusive. Incomplete current-day report. | `reports/today/YYYY-MM-DD.html`, `reports/today/YYYY-MM-DD.pdf`, `reports/charts/today-*.png` |
+| 1. Generate today's report | UTC midnight inclusive to a single captured current instant exclusive. Incomplete current-day report. | `reports/today/YYYY-MM-DD.html`, `reports/today/YYYY-MM-DD.pdf`, `reports/charts/today-YYYY-MM-DD-<sha256>.png` |
 | 2. Generate previous day's report | Previous completed UTC day | `reports/daily/YYYY-MM-DD.{html,pdf}` |
 | 3. Generate previous week's report | Previous completed UTC Monday–Sunday | `reports/weekly/YYYY-MM-DD_to_YYYY-MM-DD.{html,pdf}` |
 | 4. Generate daily and weekly reports | Both completed windows | Daily and weekly paths above |
@@ -66,7 +66,7 @@ The cron guard rechecks the entire table before writing and preserves unrelated 
 
 The engine writes a chart when there are valid samples and a PDF when PDF output is enabled. **NO DATA** is a valid result for an empty window. Wait a second after a new sample if generating immediately, since the cutoff is exclusive and timestamps have second precision. Today's generation leaves completed daily and weekly reports and historical measurements intact. The existing UTC cron schedule still runs daily at 00:10, weekly on Mondays at 00:20, and rotation at 00:30.
 
-Use **7 → 1/2/3** for the latest current-day, daily or weekly PDF, **7 → 4/5/6** for their folders, and **7 → 7** to browse HTML and PNG. All open requests require confirmation. PDFs also pass a local readability check. Existing PDFs are viewable with PDF creation switched off. For missing artifacts, the menu can take you to **Generate Reports** after confirmation.
+Use **7 → 1** for the PDF dated today in UTC. If it is absent, generate today's report with **6 → 1**. Use **7 → 4** to browse older partial reports in their folder. The latest completed daily and weekly PDFs are under **7 → 2/3**, their folders under **7 → 5/6**, and HTML and PNG browsing under **7 → 7**. All open requests require confirmation. PDFs also pass a local readability check. Existing PDFs are viewable with PDF creation switched off. For missing artifacts, the menu can take you to **Generate Reports** after confirmation.
 
 On WSL, the launcher translates the path and asks Windows PowerShell to open it using the default file association. It can also use `wslview` where available. On Linux, it tries `xdg-open` or `gio open`. Acceptance by an opener is only confirmation that the request was handed off. A failure prints the exact absolute path and a paste-ready command. For example, from the checkout:
 
