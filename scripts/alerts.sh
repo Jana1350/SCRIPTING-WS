@@ -10,65 +10,13 @@ repo_root() {
     root=$(git -C "$dir" rev-parse --show-toplevel && printf '.') || die 7 "Git checkout required"
     root=${root%$'\n.'}
 }
-read_config() {
-    local file=$1 line key value
-    local -A seen=()
-    [[ -f $file && -r $file ]] || die 2 "unreadable config: $file"
-    cmp -s "$file" <(tr -d '\000' < "$file") || die 2 "binary config"
-    while IFS= read -r line || [[ -n $line ]]; do
-        [[ -z $line || $line == '#'* ]] && continue
-        [[ $line =~ ^([A-Z_]+)=(.*)$ ]] || die 2 "invalid config line"
-        key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-        case $key in
-            CPU_WARNING|CPU_CRITICAL|MEMORY_WARNING|MEMORY_CRITICAL|DISK_WARNING|DISK_CRITICAL|ALERT_HYSTERESIS_PERCENT|EMAIL_TO|MAIL_ENABLED|DISK_MOUNT|CPU_SAMPLE_SECONDS|WATCH_INTERVAL_SECONDS|MAX_DATA_AGE_SECONDS|LOG_RETENTION_DAYS|REPORT_PDF_ENABLED) ;;
-            *) die 2 "unknown config key";;
-        esac
-        [[ ! ${seen[$key]+x} && ! $value =~ [[:cntrl:]] ]] || die 2 "duplicate key or control character"
-        [[ $value != *['$`;&|<>()']* ]] || die 2 "invalid config value"
-        seen[$key]=1
-        cfg[$key]=$value
-    done < "$file"
-    printf 'sysguard: loaded %s\n' "$file" >&2
-}
-require_default_config() {
-    [[ -f $root/config/defaults.conf ]] || die 2 "missing default config"
-}
 load_config() {
-    local file=$1 key metric w c
-    if [[ -n $file ]]; then
-        [[ $file == /* ]] || file=$root/$file
-        [[ ! $file =~ [[:cntrl:]] ]] || die 2 "invalid config path"
-        if [[ -f $root/config/defaults.conf && $file != "$root/config/defaults.conf" ]]; then
-            read_config "$root/config/defaults.conf"
-        fi
-        read_config "$file"
-    else
-        read_config "$root/config/defaults.conf"
-        if [[ -e $root/config/local.conf || -L $root/config/local.conf ]]; then
-            read_config "$root/config/local.conf"
-        fi
-    fi
-    for key in CPU_WARNING CPU_CRITICAL MEMORY_WARNING MEMORY_CRITICAL DISK_WARNING DISK_CRITICAL ALERT_HYSTERESIS_PERCENT CPU_SAMPLE_SECONDS WATCH_INTERVAL_SECONDS MAX_DATA_AGE_SECONDS LOG_RETENTION_DAYS; do
-        [[ ${cfg[$key]-} =~ ^[0-9]{1,9}$ ]] || die 2 "invalid $key"
-        cfg[$key]=$((10#${cfg[$key]}))
-    done
-    for metric in CPU MEMORY DISK; do
-        w=${cfg[${metric}_WARNING]} c=${cfg[${metric}_CRITICAL]}
-        (( w < c && c <= 100 && cfg[ALERT_HYSTERESIS_PERCENT] <= 20 &&
-           (cfg[ALERT_HYSTERESIS_PERCENT] == 0 || cfg[ALERT_HYSTERESIS_PERCENT] < w) )) || die 2 "invalid thresholds"
-    done
-    (( cfg[CPU_SAMPLE_SECONDS] > 0 && cfg[WATCH_INTERVAL_SECONDS] > cfg[CPU_SAMPLE_SECONDS] &&
-       cfg[MAX_DATA_AGE_SECONDS] >= cfg[WATCH_INTERVAL_SECONDS]+cfg[CPU_SAMPLE_SECONDS] &&
-       cfg[LOG_RETENTION_DAYS] > 0 )) || die 2 "invalid intervals"
-    [[ ${cfg[MAIL_ENABLED]-} =~ ^[01]$ && ${cfg[REPORT_PDF_ENABLED]-} =~ ^[01]$ ]] || die 2 "invalid boolean"
-    [[ ${cfg[DISK_MOUNT]-} =~ ^/[[:alnum:]_./[:blank:]-]*$ && -d ${cfg[DISK_MOUNT]} && -x ${cfg[DISK_MOUNT]} ]] || die 2 "invalid disk mount"
-    local local_part='[A-Za-z0-9][A-Za-z0-9_+-]*(\.[A-Za-z0-9_+-]+)*'
-    local domain='[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+'
-    local address="^${local_part}@${domain}$"
-    [[ ${cfg[EMAIL_TO]+x} ]] || die 2 "missing EMAIL_TO"
-    if [[ -n ${cfg[EMAIL_TO]} || ${cfg[MAIL_ENABLED]} == 1 ]]; then
-        [[ ${cfg[EMAIL_TO]} =~ $address ]] || die 2 "invalid recipient"
-    fi
+    local override=$1
+    shift
+    # shellcheck source=scripts/config.sh
+    source "$root/scripts/config.sh" || die 7 "shared configuration loader unavailable"
+    sysguard_config_load "$root" "$override" cfg "$@" ||
+        die "$?" "configuration could not be loaded or validated"
 }
 instant() {
     local stamp=$1
@@ -244,9 +192,10 @@ alerts_once() (
     repo_root
     if (($#)); then
         # The monitor always requires tracked defaults, even with an explicit override.
-        require_default_config
+        load_config "$config"
+    else
+        load_config "$config" allow-standalone
     fi
-    load_config "$config"
     [[ $mode != real || ${cfg[MAIL_ENABLED]} == 1 ]] || die 2 "real mail disabled"
     if (($#)); then
         "$@" || exit "$?"

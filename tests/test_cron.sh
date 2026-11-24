@@ -32,6 +32,33 @@ expect 2 "$cron" --print --mail-mode
 expect 2 "$cron" --print --mail-mode unsupported
 expect 2 "$cron" --print --mail-mode real --mail-mode real
 [[ ! -e $FAKE_TABLE && ! -e $repo/runtime ]]
+# Invalid config must stop both preview and installation before crontab access.
+invalid_config=$temp/invalid.conf
+mkdir "$repo/mount target"$'\n'
+ln -s $'mount target\n' "$repo/mount-alias"
+for invalid in $'CPU_WARNING=20\nALERT_HYSTERESIS_PERCENT=20' \
+    'EMAIL_TO=first..last@example.test' 'DISK_MOUNT=mount-alias' 'REPORT_PDF_ENABLED=01'; do
+    printf '%s\n' "$invalid" > "$invalid_config"
+    for action in --print --install; do
+        expect 2 "$cron" "$action" --config "$invalid_config"
+        [[ ! -s $temp/stdout && ! -e $FAKE_TABLE.calls && ! -e $repo/runtime ]]
+    done
+done
+if (( EUID != 0 )); then
+    chmod 000 "$invalid_config"
+    expect 4 "$cron" --install --config "$invalid_config"
+    [[ ! -s $temp/stdout && ! -e $FAKE_TABLE.calls && ! -e $repo/runtime ]]
+    chmod 600 "$invalid_config"
+fi
+echo 'PASS shared config validation before rendering, crontab access or runtime writes'
+# Unconfigured preview is available, but an installed job needs defaults.
+mv "$repo/config/defaults.conf" "$temp/standalone.conf"
+expect 0 "$cron" --print
+cmp "$temp/stdout" "$temp/preview"
+expect 2 "$cron" --install --config "$temp/standalone.conf"
+grep -Fq 'missing default config' "$temp/stderr"
+[[ ! -e $FAKE_TABLE.calls && ! -e $repo/runtime ]]
+mv "$temp/standalone.conf" "$repo/config/defaults.conf"
 expect 7 "$cron" --install
 for f in main.sh report.sh rotate_logs.sh; do
     printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@"\n' > "$repo/scripts/$f"
@@ -103,7 +130,12 @@ cmp "$FAKE_TABLE" "$temp/installed"
 [[ $(wc -l < "$FAKE_TABLE.writes") == 1 ]]
 expect 0 "$cron" --help
 grep -Fq 'setup_cron.sh --uninstall [--config FILE]' "$temp/stdout"
+# Uninstall also works when the shared loader and valid config are unavailable.
+mv "$repo/scripts/config.sh" "$temp/config.sh"
+printf '%s\n' UNKNOWN=1 > "$repo/config/local.conf"
 expect 0 "$cron" --uninstall --config 'config/missing uninstall.conf'
+mv "$temp/config.sh" "$repo/scripts/config.sh"
+unlink "$repo/config/local.conf"
 diff -u <(printf '%s\n' "$before" "$after") "$FAKE_TABLE"
 expect 0 "$cron" --uninstall
 [[ $(wc -l < "$FAKE_TABLE.writes") == 2 ]]

@@ -93,8 +93,10 @@ render() {
 }
 if [[ $action != --uninstall ]]; then
     [[ $root$config != *%* && ! $root$config =~ [[:cntrl:]] ]] || die 2 "path unsafe for cron"
-    if [[ $mail_mode == real ]]; then require_default_config; fi
-    if [[ $action == --install || -n $mail_mode || -n $config || -e $root/config/defaults.conf ]]; then
+    if [[ $action == --install || -n $mail_mode || -n $config ||
+        -e $root/config/defaults.conf || -L $root/config/defaults.conf ||
+        -e $root/config/local.conf || -L $root/config/local.conf ||
+        ( -d $root/config && ! -x $root/config ) ]]; then
         load_config "$config"
     fi
     if [[ $mail_mode == real ]]; then

@@ -9,7 +9,7 @@ sandbox() {
     repo="$temp/SysGuard user's checkout"
     git init -q "$repo"
     mkdir -p "$repo/scripts" "$repo/config" "$temp/bin" "$temp/data"
-    cp "$source/alerts.sh" "$source/setup_cron.sh" "$repo/scripts/"
+    cp "$source/"{alerts,config,setup_cron}.sh "$repo/scripts/"
     cat > "$repo/config/defaults.conf" <<'CONF'
 CPU_WARNING=75
 CPU_CRITICAL=90
@@ -46,6 +46,66 @@ if [[ $# == 1 && $1 == +%s ]]; then echo 1800000000; else exec /usr/bin/date "$@
 CLOCK
     chmod +x "$temp/bin/date"
 }
+test_config_mounts() (
+    sandbox
+    freeze_clock
+    local mount='disk @root' path data stamp
+    local alerts=$repo/scripts/alerts.sh config=$temp/override.conf
+    stamp=$(date -u -d '@1800000000' '+%Y-%m-%dT%H:%M:%S%:z')
+    ln -s / "$repo/$mount"
+    cd "$temp"
+    for path in "$mount" "$repo/$mount"; do
+        data=$(mktemp -d "$temp/mount.XXXXXXXX")
+        printf '%s\n%s,10.0,20.0,95.0\n' 'timestamp,cpu_percent,memory_percent,disk_percent' "$stamp" > "$data/metrics.csv"
+        printf 'DISK_MOUNT=%s\n' "$path" > "$config"
+        expect 0 "$alerts" --once --config "$config" --data-dir "$data"
+        grep -Fxq "$stamp,disk,NORMAL,CRITICAL,95.0,95,escalation" "$data/alerts/events.csv"
+    done
+
+    mkdir "$temp/mount target"$'\n'
+    ln -s "$temp/mount target"$'\n' "$repo/mount-alias"
+    ln -s / "$repo/disk;invalid"
+    for path in '' missing 'disk;invalid' mount-alias; do
+        printf 'DISK_MOUNT=%s\n' "$path" > "$config"
+        expect 2 "$alerts" --once --config "$config" --data-dir "$temp/absent-data"
+        [[ ! -e $temp/absent-data ]]
+    done
+    echo 'PASS shared mount validation and rejection of a control character in the resolved path'
+)
+
+test_config_preflight() (
+    sandbox
+    freeze_clock
+    local alerts=$repo/scripts/alerts.sh config=$temp/override.conf marker=$temp/collector-called
+    local data=$temp/absent-data stamp mode
+    printf '%s\n' MAIL_ENABLED=1 EMAIL_TO=ops@example.test CPU_WARNING=20 ALERT_HYSTERESIS_PERCENT=20 > "$config"
+    for mode in mock real; do
+        # The child Bash expands its own positional arguments.
+        # shellcheck disable=SC2016
+        expect 2 bash -c 'source "$1"; alerts_once "$2" "$3" "$4" touch "$5"' \
+            sysguard "$alerts" "$config" "$data" "$mode" "$marker"
+        [[ ! -e $marker && ! -e $data && ! -e $repo/runtime ]]
+    done
+    if (( EUID != 0 )); then
+        chmod 000 "$config"
+        expect 4 "$alerts" --once --config "$config" --data-dir "$data"
+        [[ ! -e $data && ! -e $repo/runtime ]]
+    fi
+
+    mv "$repo/config/defaults.conf" "$temp/complete.conf"
+    # The child Bash expands its own positional arguments.
+    # shellcheck disable=SC2016
+    expect 2 bash -c 'source "$1"; alerts_once "$2" "$3" mock touch "$4"' \
+        sysguard "$alerts" "$temp/complete.conf" "$data" "$marker"
+    [[ ! -e $marker && ! -e $data && ! -e $repo/runtime ]]
+    mkdir "$data"
+    stamp=$(date -u -d '@1800000000' '+%Y-%m-%dT%H:%M:%S%:z')
+    printf '%s\n%s,75.0,20.0,40.0\n' 'timestamp,cpu_percent,memory_percent,disk_percent' "$stamp" > "$data/metrics.csv"
+    expect 0 "$alerts" --once --config "$temp/complete.conf" --data-dir "$data"
+    grep -Fq ',captured,mock' "$data/alerts/delivery.csv"
+    echo 'PASS invalid config rejected before collection, shared I/O status and standalone config'
+)
+
 test_locks() (
     sandbox
     freeze_clock
@@ -234,10 +294,10 @@ FAKE
     for recipient in first..last@example.test .first@example.test first.@example.test; do
         printf 'MAIL_ENABLED=1\nEMAIL_TO=%s\n' "$recipient" > "$config"
         expect 2 "${command[@]}" --data-dir "$temp/data"
-        grep -Fq 'invalid recipient' "$temp/stderr"
+        grep -Fq 'configuration could not be loaded or validated' "$temp/stderr"
         [[ ! -e $temp/data/alerts && ! -e $FAKE_MAIL_CALLS ]]
         expect 2 "${command[@]}" --data-dir "$data"
-        grep -Fq 'invalid recipient' "$temp/stderr"
+        grep -Fq 'configuration could not be loaded or validated' "$temp/stderr"
         [[ ! -e $FAKE_MAIL_CALLS && $(sha256sum "${records[@]}") == "$baseline" ]]
     done
     echo 'PASS recipient validation before mailx invocation or alert state changes'
@@ -246,4 +306,6 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     (test_alerts)
     test_locks
     test_recipients
+    test_config_mounts
+    test_config_preflight
 fi
