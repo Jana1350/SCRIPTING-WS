@@ -352,6 +352,12 @@ main_exit 0 --status --data-dir 'data set'
 main_exit 2 --status --config missing
 main_exit 2 --report monthly
 main_exit 7 --report daily
+main_exit 2 --mail-mode real
+main_exit 2 --status --mail-mode real
+main_exit 2 --report daily --mail-mode real
+main_exit 2 --once --mail-mode
+main_exit 2 --once --mail-mode unsupported
+main_exit 2 --once --mail-mode real --mail-mode real
 main_exit 7 --once --data-dir 'data set'
 [[ ! -e "$suite/data set" ]] || fail 'missing alerts dependency caused writes'
 export CALL_LOG=$work/calls
@@ -385,6 +391,143 @@ for period in daily weekly; do
     printf '%s\n' report.sh "$period" --config "$suite/cfg file" > "$work/expected"
     cmp "$CALL_LOG" "$work/expected" || fail 'report delegation'
 done
+
+# Real alerts code, a fixture collector and a fake mail client.
+git init -q "$suite"
+cp -- "$root/scripts/alerts.sh" "$suite/scripts/"
+mail_bin=$work/mail-bin
+mkdir -- "$mail_bin"
+export SYSGUARD_MAIL_TEST_CAPTURE="$work/captured-mail"
+export SYSGUARD_MAIL_TEST_CALLS="$work/mail-calls"
+cat > "$mail_bin/mailx" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$SYSGUARD_MAIL_TEST_CALLS"
+if [[ $# == 1 && $1 == --help ]]; then
+    printf '%s\n' 'Usage: mailx -s subject recipient'
+    exit 0
+fi
+[[ $# == 3 && $1 == -s && $3 == ops@example.test ]] || exit 91
+printf '%s\n' "$3" >> "$SYSGUARD_MAIL_TEST_CAPTURE"
+cat >> "$SYSGUARD_MAIL_TEST_CAPTURE"
+exit "${MAIL_TEST_RESULT:-0}"
+STUB
+cat > "$suite/scripts/monitor.sh" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$@" >> "$CALL_LOG"
+[[ $1 == --once ]] || exit 2
+shift
+while (($#)); do
+    case $1 in
+        --config) config=$2; shift 2;;
+        --data-dir) data=$2; shift 2;;
+        *) exit 2;;
+    esac
+done
+if [[ ${MAIL_TEST_WRITE_SAMPLE:-0} == 1 ]]; then
+    mkdir -p -- "$data"
+    printf '%s\n%s,90.0,40.0,40.0\n' 'timestamp,cpu_percent,memory_percent,disk_percent' \
+        '2027-01-15T08:00:00+00:00' > "$data/metrics.csv"
+fi
+if [[ ${MAIL_TEST_REPLACE_CONFIG:-0} == 1 ]]; then
+    printf '%s\n' MAIL_ENABLED=0 > "$config"
+fi
+exit "${MONITOR_RESULT:-0}"
+STUB
+cat > "$mail_bin/date" <<'STUB'
+#!/usr/bin/env bash
+if [[ $# == 1 && $1 == +%s ]]; then
+    printf '%s\n' 1800000000
+else
+    exec /usr/bin/date "$@"
+fi
+STUB
+chmod +x -- "$mail_bin/mailx" "$mail_bin/date"
+seed_alert_data() {
+    mkdir -- "$suite/$1"
+    local sample_stamp
+    sample_stamp=$(date -u -d '@1800000000' '+%Y-%m-%dT%H:%M:%S%:z')
+    printf '%s\n%s,90.0,40.0,40.0\n' "$expected_header" "$sample_stamp" > "$suite/$1/metrics.csv"
+}
+printf '%s\n' MAIL_ENABLED=1 EMAIL_TO=ops@example.test > "$suite/config/local.conf"
+printf '%s\n' MAIL_ENABLED=0 > "$work/mail-disabled.conf"
+: > "$CALL_LOG"
+PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 2 --once --data-dir absent-mail \
+    --mail-mode real --config "$work/mail-disabled.conf"
+[[ ! -s $CALL_LOG && ! -e $suite/absent-mail && ! -e $suite/runtime && ! -e $SYSGUARD_MAIL_TEST_CALLS ]] ||
+    fail 'disabled real mail created activity in a fresh checkout'
+seed_alert_data default-mail
+PATH="$mail_bin:$PATH" main_exit 0 --once --data-dir default-mail
+grep -Fq ',captured,mock' "$suite/default-mail/alerts/delivery.csv" || fail 'default mail mode with mail enabled'
+[[ ! -e $SYSGUARD_MAIL_TEST_CALLS ]] || fail 'default mode invoked mailx'
+seed_alert_data real-mail
+: > "$CALL_LOG"
+PATH="$mail_bin:$PATH" main_exit 0 --once --data-dir real-mail --mail-mode real
+printf '%s\n' --once --data-dir "$suite/real-mail" | cmp - "$CALL_LOG" || fail 'real-mode collector arguments'
+grep -Fq ',submitted,mailx_exit_zero' "$suite/real-mail/alerts/delivery.csv" || fail 'explicit real mail mode'
+grep -Fq '90.0%' "$SYSGUARD_MAIL_TEST_CAPTURE" || fail 'fake mailx did not receive fixture body'
+cp -- "$SYSGUARD_MAIL_TEST_CAPTURE" "$work/previous-mail"
+cp -- "$SYSGUARD_MAIL_TEST_CALLS" "$work/previous-mail-calls"
+seed_alert_data disabled-mail
+sed -i 's/,90\.0,/,75.0,/' "$suite/disabled-mail/metrics.csv"
+cp "$suite/disabled-mail/metrics.csv" "$work/previous-metrics"
+: > "$CALL_LOG"
+PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 2 --once --data-dir disabled-mail --mail-mode real --config "$work/mail-disabled.conf"
+grep -Fq 'real mail disabled' "$work/stderr" || fail 'missing disabled-mail diagnostic'
+[[ ! -s $CALL_LOG ]] || fail 'disabled real mail invoked the collector'
+cmp "$work/previous-metrics" "$suite/disabled-mail/metrics.csv" || fail 'disabled real mail changed metrics'
+[[ ! -e $suite/disabled-mail/alerts ]] || fail 'disabled real mail wrote alert state'
+cmp "$work/previous-mail" "$SYSGUARD_MAIL_TEST_CAPTURE" || fail 'disabled real mail invoked mailx'
+
+real_records=("$suite/real-mail/metrics.csv" "$suite/real-mail/alerts/"{state.tsv,events.csv,delivery.csv})
+records_before=$(sha256sum "${real_records[@]}")
+for invalid_config in 'EMAIL_TO=.first@example.test' 'EMAIL_TO=first..last@example.test' \
+    'EMAIL_TO=first.@example.test' 'EMAIL_TO=' 'EMAIL_TO=first last@example.test' \
+    'CPU_WARNING=90' 'ALERT_HYSTERESIS_PERCENT=21' 'LOG_RETENTION_DAYS=0' \
+    'WATCH_INTERVAL_SECONDS=1' 'MAX_DATA_AGE_SECONDS=10' 'DISK_MOUNT=/nonexistent-sysguard-mount' \
+    'REPORT_PDF_ENABLED=2' 'UNRECOGNIZED=1' $'EMAIL_TO=$(false)' \
+    $'CPU_WARNING=75\nCPU_WARNING=76' $'EMAIL_TO=first@example.test\r'; do
+    printf '%s\n' MAIL_ENABLED=1 "$invalid_config" > "$work/invalid-mail.conf"
+    PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 2 --once --mail-mode real \
+        --config "$work/invalid-mail.conf" --data-dir real-mail
+    PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 2 --once --mail-mode real \
+        --config "$work/invalid-mail.conf" --data-dir absent-mail
+    [[ ! -s $CALL_LOG && ! -e $suite/absent-mail ]] || fail 'invalid configuration invoked the collector'
+    [[ $(sha256sum "${real_records[@]}") == "$records_before" ]] || fail 'invalid configuration changed records'
+    cmp "$work/previous-mail-calls" "$SYSGUARD_MAIL_TEST_CALLS" || fail 'invalid configuration invoked mailx'
+done
+printf 'MAIL_ENABLED=1\nEMAIL_TO=bad\0@example.test\n' > "$work/binary-mail.conf"
+for invalid_path in "$work/binary-mail.conf" "$work/missing-mail.conf" "$work/mail-disabled.conf"$'\n'; do
+    PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 2 --once --mail-mode real \
+        --config "$invalid_path" --data-dir absent-mail
+    [[ ! -s $CALL_LOG && ! -e $suite/absent-mail ]] || fail 'invalid configuration file invoked the collector'
+    cmp "$work/previous-mail-calls" "$SYSGUARD_MAIL_TEST_CALLS" || fail 'invalid configuration file invoked mailx'
+done
+
+# A bad implicit override stops collection, while an explicit valid override wins.
+printf '%s\n' MAIL_ENABLED=1 EMAIL_TO=.first@example.test > "$suite/config/local.conf"
+PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 main_exit 2 --once --mail-mode real --data-dir absent-mail
+[[ ! -s $CALL_LOG && ! -e $suite/absent-mail ]] || fail 'invalid local override invoked the collector'
+printf '%s\n' MAIL_ENABLED=1 EMAIL_TO=ops@example.test > "$suite/valid mail.conf"
+PATH="$mail_bin:$PATH" MONITOR_RESULT=3 main_exit 3 --once --mail-mode real \
+    --config 'valid mail.conf' --data-dir absent-mail
+cmp "$work/previous-mail-calls" "$SYSGUARD_MAIL_TEST_CALLS" || fail 'failed collection invoked mailx'
+: > "$CALL_LOG"
+PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 MAIL_TEST_RESULT=1 main_exit 5 --once --mail-mode real \
+    --config 'valid mail.conf' --data-dir delivery-failed
+printf '%s\n' --once --config "$suite/valid mail.conf" --data-dir "$suite/delivery-failed" |
+    cmp - "$CALL_LOG" || fail 'wrong collector arguments in real mode'
+cmp "$suite/real-mail/metrics.csv" "$suite/delivery-failed/metrics.csv" || fail 'failed delivery lost collected metrics'
+grep -Fq ',cpu,NORMAL,CRITICAL,90.0,' "$suite/delivery-failed/alerts/events.csv" || fail 'failed delivery lost events'
+grep -q $'cpu\t.*\tCRITICAL\t90.0' "$suite/delivery-failed/alerts/state.tsv" || fail 'failed delivery lost state'
+grep -Fq ',failed,mailx_error' "$suite/delivery-failed/alerts/delivery.csv" || fail 'missing delivery failure record'
+
+cp -- "$suite/valid mail.conf" "$suite/replace mail.conf"
+PATH="$mail_bin:$PATH" MAIL_TEST_WRITE_SAMPLE=1 MAIL_TEST_REPLACE_CONFIG=1 main_exit 0 --once --mail-mode real \
+    --config 'replace mail.conf' --data-dir validated-mail
+grep -Fxq MAIL_ENABLED=0 "$suite/replace mail.conf" || fail 'fixture did not replace config during collection'
+grep -Fq ',submitted,mailx_exit_zero' "$suite/validated-mail/alerts/delivery.csv" || fail 'alerts did not reuse validated settings'
+printf '%s\n' 'PASS: mock default, real-mail preflight, runtime delivery failure and preserved metrics'
 
 # A foreground child with normal signal dispositions receives each signal by PID.
 # The sleep shim records the exact wait point and then uses exec to retain its PID.

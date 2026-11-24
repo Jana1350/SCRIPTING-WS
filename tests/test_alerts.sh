@@ -191,4 +191,59 @@ FAILMOVE
     expect 4 "$repo/scripts/alerts.sh" --once --data-dir "$csv"
     echo 'PASS alert transitions, persistence, validation, locks and mock delivery'
 }
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then (test_alerts); test_locks; fi
+test_recipients() (
+    sandbox
+    freeze_clock
+    local alerts=$repo/scripts/alerts.sh config=$temp/recipient.conf
+    local header=timestamp,cpu_percent,memory_percent,disk_percent
+    local recipient stamp baseline data
+    local -a command=("$alerts" --once --mail-mode real --config "$config")
+    export FAKE_MAIL_CALLS="$temp/mailx.calls"
+    cat > "$temp/bin/mailx" <<'FAKE'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$FAKE_MAIL_CALLS"
+if [[ $# == 1 && $1 == --help ]]; then
+    printf '%s\n' 'Usage: mailx -s subject recipient'
+    exit 0
+fi
+[[ $# == 3 && $1 == -s ]] || exit 91
+cat >/dev/null
+FAKE
+    chmod +x "$temp/bin/mailx"
+    [[ $(command -v mailx) == "$temp/bin/mailx" ]]
+
+    stamp=$(date -u -d '@1799999940' '+%Y-%m-%dT%H:%M:%S%:z')
+    for recipient in first.last@example.test first+alerts@example.test; do
+        data=$temp/$recipient
+        mkdir -- "$data"
+        printf 'MAIL_ENABLED=1\nEMAIL_TO=%s\n' "$recipient" > "$config"
+        printf '%s\n%s,75.0,50.0,40.0\n' "$header" "$stamp" > "$data/metrics.csv"
+        expect 0 "${command[@]}" --data-dir "$data"
+        grep -Fq -- " $recipient" "$FAKE_MAIL_CALLS"
+        grep -Fq ",$recipient,submitted,mailx_exit_zero" "$data/alerts/delivery.csv"
+    done
+
+    # A new critical sample would change all three files if validation let it through.
+    local -a records=("$data/alerts/"{state.tsv,events.csv,delivery.csv})
+    baseline=$(sha256sum "${records[@]}")
+    unlink "$FAKE_MAIL_CALLS"
+    stamp=$(date -u -d '@1800000000' '+%Y-%m-%dT%H:%M:%S%:z')
+    printf '%s\n%s,90.0,50.0,40.0\n' "$header" "$stamp" > "$data/metrics.csv"
+    cp -- "$data/metrics.csv" "$temp/data/metrics.csv"
+    for recipient in first..last@example.test .first@example.test first.@example.test; do
+        printf 'MAIL_ENABLED=1\nEMAIL_TO=%s\n' "$recipient" > "$config"
+        expect 2 "${command[@]}" --data-dir "$temp/data"
+        grep -Fq 'invalid recipient' "$temp/stderr"
+        [[ ! -e $temp/data/alerts && ! -e $FAKE_MAIL_CALLS ]]
+        expect 2 "${command[@]}" --data-dir "$data"
+        grep -Fq 'invalid recipient' "$temp/stderr"
+        [[ ! -e $FAKE_MAIL_CALLS && $(sha256sum "${records[@]}") == "$baseline" ]]
+    done
+    echo 'PASS recipient validation before mailx invocation or alert state changes'
+)
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    (test_alerts)
+    test_locks
+    test_recipients
+fi

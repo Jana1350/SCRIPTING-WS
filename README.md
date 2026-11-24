@@ -49,9 +49,20 @@ These readings describe the Linux environment visible inside WSL. Windows host m
 
 The monitor loads [config/defaults.conf](config/defaults.conf), then applies [config/example.local.conf](config/example.local.conf) only if explicitly selected. Normally the override is the optional, Git-ignored `config/local.conf`. An explicit `--config FILE` selects the override for that invocation. Use trusted, non-executable `KEY=value` files. The parser accepts known keys, rejects duplicates within a file, and does not evaluate shell commands. Keep credentials out of these files and Git.
 
-Defaults use a one-second CPU sample, a 60-second watch interval, and the root mount. Warning/critical defaults are 75/90 for CPU and memory and 80/95 for disk. Each warning must be below its critical threshold, the watch interval must exceed the sampling delay, and the maximum data age must cover their sum. Thresholds are configuration for the alerts consumer. A monitor row contains measurements. Mail is disabled by default.
+Defaults use a one-second CPU sample, a 60-second watch interval, and the root mount. Warning/critical defaults are 75/90 for CPU and memory and 80/95 for disk. Each warning must be below its critical threshold, the watch interval must exceed the sampling delay, and the maximum data age must cover their sum. Thresholds are configuration for the alerts consumer. A monitor row contains measurements.
 
 The writer takes an exclusive lock before opening the active CSV. It validates the active history, stages the complete updated file in the destination directory, then publishes it by rename. Sensor, validation, or staging failures preserve the previous CSV. The default data directory uses the persistent `runtime/metrics.lock`. Other canonical data directories use their own `.metrics.lock`. Rotation must use the same lock inode. Atomic publication has been tested. Power-loss durability remains unverified.
+
+## Real email alerts
+
+External email delivery is disabled by default. `scripts/main.sh --once` and the default cron monitoring job still evaluate alerts, record transitions, and capture mock delivery locally. Real delivery requires both `MAIL_ENABLED=1` in the effective configuration and an explicit `--mail-mode real` option. Put the single recipient in `EMAIL_TO` in your Git-ignored `config/local.conf`. Keep local configuration outside Git and keep SMTP credentials in the mail transport's own configuration.
+
+- `scripts/main.sh --once --mail-mode real` validates the real-mail configuration before starting collection. Invalid configuration returns `2` before any metrics or alert records change. After successful collection, alerts use the validated settings. A transport submission failure returns `5` and preserves the collected sample, alert state, and events. The delivery history records the failed attempt.
+- `scripts/setup_cron.sh --print --mail-mode real` validates the configuration and previews the cron block. The real-mail option applies only to the monitoring job.
+- `scripts/setup_cron.sh --install --mail-mode real` installs that block after you have reviewed the preview and authorized installation. Preview and install accept `--config FILE` when you need an explicit override.
+- `scripts/setup_cron.sh --uninstall` removes the managed block. It accepts `--config FILE` for compatibility and skips configuration loading.
+
+Real delivery requires a `mailx` variant that advertises `-s` in its help and a working outgoing mail transport. Cron jobs use `PATH=/usr/bin:/bin`, so `mailx` must be available on that path for scheduled delivery. On WSL the cron daemon and Linux instance must be running when the job is scheduled. A `submitted` entry records a successful `mailx` exit. Inbox delivery requires separate confirmation. Automated tests use fake mail and crontab commands. Live SMTP delivery and cron execution require separate verification. See [alert and cron operations](docs/OPERATIONS.md) for operational details.
 
 ## Exit codes
 
