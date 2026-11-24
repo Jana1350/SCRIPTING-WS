@@ -41,74 +41,6 @@ repo_path() {
     fi
 }
 
-read_config() {
-    local path=$1 fd contents line key value
-    local -A seen=()
-    [[ -f $path ]] || return 2
-    exec {fd}< "$path" || return 4
-    # Reading up to NUL lets us reject binary content before parsing it as text.
-    if IFS= read -r -d '' contents <&"$fd"; then
-        exec {fd}<&-
-        return 2
-    fi
-    exec {fd}<&-
-    while IFS= read -r line; do
-        [[ -z $line || $line == \#* ]] && continue
-        [[ $line =~ ^([A-Z_]+)=(.*)$ ]] || return 2
-        key=${BASH_REMATCH[1]}
-        value=${BASH_REMATCH[2]}
-        [[ ${settings[$key]+known} && ! ${seen[$key]+duplicate} ]] || return 2
-        [[ $value != *[[:cntrl:]]* && $value != *['$`;&|<>()']* ]] || return 2
-        seen[$key]=1
-        settings[$key]=$value
-    done <<< "$contents"
-}
-
-load_config() {
-    local override=$1 key value metric warning critical
-    settings=(
-        [CPU_WARNING]='' [CPU_CRITICAL]='' [MEMORY_WARNING]='' [MEMORY_CRITICAL]=''
-        [DISK_WARNING]='' [DISK_CRITICAL]='' [DISK_MOUNT]='' [CPU_SAMPLE_SECONDS]=''
-        [WATCH_INTERVAL_SECONDS]='' [MAX_DATA_AGE_SECONDS]='' [ALERT_HYSTERESIS_PERCENT]=''
-        [LOG_RETENTION_DAYS]='' [EMAIL_TO]='' [MAIL_ENABLED]='' [REPORT_PDF_ENABLED]=''
-    )
-    read_config "$repo_root/config/defaults.conf" || return "$?"
-    if [[ ${options[--config]+set} || -e $override || -L $override ]]; then
-        read_config "$override" || return "$?"
-        diagnostic "loaded defaults and override $override"
-    else
-        diagnostic "loaded $repo_root/config/defaults.conf"
-    fi
-
-    for key in CPU_WARNING CPU_CRITICAL MEMORY_WARNING MEMORY_CRITICAL DISK_WARNING DISK_CRITICAL \
-        CPU_SAMPLE_SECONDS WATCH_INTERVAL_SECONDS MAX_DATA_AGE_SECONDS ALERT_HYSTERESIS_PERCENT \
-        LOG_RETENTION_DAYS MAIL_ENABLED REPORT_PDF_ENABLED; do
-        value=${settings[$key]}
-        [[ $value =~ ^[0-9]{1,18}$ ]] || return 2
-        settings[$key]=$((10#$value))
-    done
-    for metric in CPU MEMORY DISK; do
-        warning=${settings[${metric}_WARNING]}
-        critical=${settings[${metric}_CRITICAL]}
-        (( warning < critical && critical <= 100 && settings[ALERT_HYSTERESIS_PERCENT] <= warning )) || return 2
-    done
-    (( settings[ALERT_HYSTERESIS_PERCENT] <= 20 && settings[CPU_SAMPLE_SECONDS] > 0 &&
-        settings[WATCH_INTERVAL_SECONDS] > settings[CPU_SAMPLE_SECONDS] &&
-        settings[MAX_DATA_AGE_SECONDS] >= settings[WATCH_INTERVAL_SECONDS] + settings[CPU_SAMPLE_SECONDS] &&
-        settings[LOG_RETENTION_DAYS] > 0 && settings[MAIL_ENABLED] <= 1 && settings[REPORT_PDF_ENABLED] <= 1 )) || return 2
-
-    value=${settings[EMAIL_TO]}
-    if [[ -n $value ]]; then
-        [[ $value =~ ^[a-zA-Z0-9._%+][a-zA-Z0-9._%+-]*@[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$ ]] || return 2
-    else
-        (( settings[MAIL_ENABLED] == 0 )) || return 2
-    fi
-    value=${settings[DISK_MOUNT]}
-    [[ -n $value ]] || return 2
-    value=$(repo_path "$value")
-    [[ -d $value && -x $value ]] || return 2
-}
-
 local_day_start() {
     local day=$1 utc_start candidate previous_day lower upper middle observed_day
     if candidate=$(date -d "$day 00:00:00" +%s 2>/dev/null) &&
@@ -624,7 +556,7 @@ main() {
     fi
 
     local -A options=() settings=()
-    local script_dir repo_root config data_dir output_root output_dir start end
+    local script_dir repo_root data_dir output_root output_dir start end
     local period report_date report_last report_name report_label chart_name=''
     local tool report_lock lock_fd summary status chart_digest
     if ! parse_args "$@"; then
@@ -632,7 +564,7 @@ main() {
         usage >&2
         return 2
     fi
-    for tool in awk cat cmp date flock gzip mkdir mktemp mv rm rmdir sha256sum sort; do
+    for tool in awk cat cmp date flock gzip mkdir mktemp mv rm rmdir sha256sum sort stat; do
         if ! command -v "$tool" >/dev/null; then
             diagnostic "required command unavailable: $tool"
             return 7
@@ -640,16 +572,21 @@ main() {
     done
     script_dir=${BASH_SOURCE[0]%/*}
     [[ $script_dir != "${BASH_SOURCE[0]}" ]] || script_dir=.
-    repo_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd -P) || return 4
-    config=$(repo_path "${options[--config]:-config/local.conf}")
-    data_dir=$(repo_path "${options[--data-dir]:-data}")
-    output_root=$(repo_path "${options[--output-dir]:-reports}")
-    output_dir=$output_root/$period
-    load_config "$config" || {
+    repo_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd -P && printf '.') || return 4
+    repo_root=${repo_root%$'\n.'}
+    # shellcheck source=scripts/config.sh
+    source "$script_dir/config.sh" || {
+        diagnostic 'shared configuration loader unavailable'
+        return 7
+    }
+    sysguard_config_load "$repo_root" "${options[--config]-}" settings || {
         status=$?
         diagnostic 'configuration could not be loaded or validated'
         return "$status"
     }
+    data_dir=$(repo_path "${options[--data-dir]:-data}")
+    output_root=$(repo_path "${options[--output-dir]:-reports}")
+    output_dir=$output_root/$period
     if ! resolve_window; then
         diagnostic 'invalid report date (expected a calendar date in YYYY-MM-DD, Monday for weekly)'
         return 3

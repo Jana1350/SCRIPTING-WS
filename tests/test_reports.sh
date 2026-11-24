@@ -21,7 +21,7 @@ html=$output/daily/$REPORT_DATE.html
 stdout=$work/stdout
 stderr=$work/stderr
 mkdir -p -- "$checkout/scripts" "$checkout/config" "$data"
-cp -- "$repo_root/scripts/report.sh" "$script"
+cp -- "$repo_root/scripts/"{report,config}.sh "$checkout/scripts/"
 cp -- "$repo_root/config/defaults.conf" "$checkout/config/defaults.conf"
 printf '%s\n' 'REPORT_PDF_ENABLED=0' > "$config"
 
@@ -92,6 +92,51 @@ expect_status 2 'configuration' bash "$script" daily --config "$work/invalid.con
 [[ ! -e $checkout/runtime && ! -e $output ]] || fail 'invalid requests created runtime or report output'
 printf '%s\n' 'PASS: help, arguments, dates, and configuration errors'
 
+# Exercise the shared loader through the report CLI before files can be created.
+config_report=(bash "$script" daily --date "$REPORT_DATE" --data-dir "$data" --output-dir "$output")
+mv -- "$checkout/config/defaults.conf" "$work/shared-defaults.conf"
+expect_status 2 'missing default config' "${config_report[@]}" --config "$work/shared-defaults.conf"
+mv -- "$work/shared-defaults.conf" "$checkout/config/defaults.conf"
+for invalid in 'CPU_WARNING=90' 'CPU_WARNING=91' 'DISK_CRITICAL=101' \
+    $'CPU_WARNING=20\nALERT_HYSTERESIS_PERCENT=20' \
+    $'MEMORY_WARNING=20\nALERT_HYSTERESIS_PERCENT=20' \
+    $'DISK_WARNING=20\nALERT_HYSTERESIS_PERCENT=20' \
+    $'CPU_WARNING=0\nALERT_HYSTERESIS_PERCENT=1' 'ALERT_HYSTERESIS_PERCENT=21' \
+    'EMAIL_TO=first..last@example.test' 'MAIL_ENABLED=1' 'MAIL_ENABLED=00' 'REPORT_PDF_ENABLED=01' \
+    'LOG_RETENTION_DAYS=1000000000000000000' 'UNKNOWN_SETTING=1' 'CPU_WARNING 75' $'# comment\r'; do
+    printf '%s\n' "$invalid" > "$work/invalid.conf"
+    expect_status 2 'configuration' "${config_report[@]}" --config "$work/invalid.conf"
+done
+printf 'EMAIL_TO=bad\0@example.test\n' > "$work/invalid.conf"
+expect_status 2 'configuration' "${config_report[@]}" --config "$work/invalid.conf"
+expect_status 2 'configuration' "${config_report[@]}" --config $'html-only.conf\n'
+if (( EUID != 0 )); then
+    cp -- "$config" "$work/unreadable.conf"
+    chmod 000 -- "$work/unreadable.conf"
+    expect_status 4 'unreadable configuration file' "${config_report[@]}" --config "$work/unreadable.conf"
+    chmod 600 -- "$work/unreadable.conf"
+fi
+[[ ! -e $checkout/runtime && ! -e $output ]] || fail 'shared validation created runtime or report output'
+
+# Defaults, the optional local override, and a spaced relative explicit path.
+config_preview=(bash "$script" daily --date "$REPORT_DATE" --data-dir "$data" --output-dir "$work/config-reports")
+config_html=$work/config-reports/daily/$REPORT_DATE.html
+expect_status 0 '' "${config_preview[@]}" --config config/defaults.conf
+[[ -s ${config_html%.html}.pdf ]] || fail 'shipped defaults did not enable PDF output'
+printf '%s\n' REPORT_PDF_ENABLED=0 > "$checkout/config/local.conf"
+expect_status 0 '' "${config_preview[@]}"
+assert_contains "$checkout/config/local.conf" "$stderr"
+printf '%s\n' REPORT_PDF_ENABLED=2 > "$checkout/config/local.conf"
+mkdir -- "$checkout/disk fixture"
+printf '%s\n' REPORT_PDF_ENABLED=0 CPU_WARNING=0 CPU_CRITICAL=100 ALERT_HYSTERESIS_PERCENT=0 \
+    WATCH_INTERVAL_SECONDS=00060 LOG_RETENTION_DAYS=999999999999999999 'DISK_MOUNT=disk fixture/.' \
+    > "$checkout/config/report override.conf"
+expect_status 0 '' "${config_preview[@]}" --config 'config/report override.conf'
+assert_contains 'Valid samples: 0' "$config_html"
+[[ -s ${config_html%.html}.pdf ]] || fail 'HTML-only override removed a previous PDF'
+unlink "$checkout/config/local.conf"
+printf '%s\n' 'PASS: shared configuration boundaries, normalization, precedence, and validation before writes'
+
 write_rows \
     '2026-11-20T08:00:00+05:30,20.0,50.0,60.0' \
     '2026-11-20T12:00:00+05:30,40.0,60.0,70.0' \
@@ -109,6 +154,10 @@ assert_metric Disk 3 60.0% 80.0% 70.00%
 cp -- "$html" "$work/original.html"
 expect_status 0 '' report --date "$REPORT_DATE"
 cmp -s -- "$work/original.html" "$html" || fail 'repeated report differs from original'
+before=$(sha256sum -- "$html" "$output"/charts/*.png)
+expect_status 2 'configuration' "${config_report[@]}" --config $'html-only.conf\n'
+[[ $(sha256sum -- "$html" "$output"/charts/*.png) == "$before" ]] ||
+    fail 'invalid configuration changed the published HTML or chart'
 assert_no_staging
 printf '%s\n' 'PASS: 3 samples per metric; CPU min/max/mean 20/60/40, memory 50/70/60, disk 60/80/70; repeated HTML matches'
 
@@ -350,7 +399,7 @@ assert_contains 'Valid samples: 2' "$output/weekly/2026-03-02_to_2026-03-08.html
 printf '%s\n' 'PASS: weekly report uses calendar boundaries across a DST transition'
 
 mkdir -- "$work/without-gnuplot" "$work/failing-chart" "$work/blocked-chart-output"
-for utility in awk bash cat cmp date flock grep gzip mkdir mktemp mv rm rmdir sha256sum sort; do
+for utility in awk bash cat cmp date flock grep gzip mkdir mktemp mv rm rmdir sha256sum sort stat; do
     ln -s -- "$(command -v "$utility")" "$work/without-gnuplot/$utility"
 done
 write_rows '2026-11-20T12:00:00+00:00,40.0,60.0,70.0'
@@ -419,7 +468,7 @@ weekly_pdf=$output/weekly/${WEEK_START}_to_2026-11-22.pdf
 pdf_config=$checkout/pdf-enabled.conf
 printf '%s\n' 'REPORT_PDF_ENABLED=1' > "$pdf_config"
 mkdir -- "$data" "$work/without-weasyprint"
-for utility in awk bash cat cmp date file flock gnuplot grep gzip ln mkdir mktemp mv pdfimages pdfinfo rm rmdir sha256sum sort tail; do
+for utility in awk bash cat cmp date file flock gnuplot grep gzip ln mkdir mktemp mv pdfimages pdfinfo rm rmdir sha256sum sort stat tail; do
     ln -s -- "$(command -v "$utility")" "$work/without-weasyprint/$utility"
 done
 write_rows \
