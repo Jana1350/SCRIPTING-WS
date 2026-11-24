@@ -86,4 +86,3 @@ tests/run_all.sh
 Run the first command for Member A's suite. It uses temporary directories, deterministic sensor inputs, and test-only child executables. The signal checks use Python 3. The second command checks the shared fixture against contract C9 before running available suites. A changed fixture exits before any suite starts. A `SKIP` line identifies an unavailable suite.
 
 Member A's tests use a real advisory lock and a controlled clock to check that watch skips contended samples and publishes a fresh row on schedule after release. They also exercise simulated rotation. Delegation tests verify arguments and exit propagation with temporary stand-ins. Use the full runner's output for the suite results in your checkout.
-hi
